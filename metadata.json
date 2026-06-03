@@ -1,0 +1,6 @@
+{
+  "name": "Kasir Pro",
+  "description": "Aplikasi Kasir Modern Indonesia - Solusi Kasir Lengkap dengan Multi-Cabang, Manajemen Stok, Laporan Keuangan, dan Mode Offline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
