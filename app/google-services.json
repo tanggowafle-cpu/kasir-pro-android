@@ -12,7 +12,36 @@
           "package_name": "com.kasirpro.app"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "357452625370-8l0ahpr0pahplpce17cupc0d44deat6m.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kasirpro.app",
+            "certificate_hash": "317944d8f1a77be50044697ca71537a095c931ca"
+          }
+        },
+        {
+          "client_id": "357452625370-j02unvjsrl2eucbldvfn754udi4pqu5n.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kasirpro.app",
+            "certificate_hash": "5fa887e74b6bea4aea6a9d0b0578e8a60a52afb6"
+          }
+        },
+        {
+          "client_id": "357452625370-lrtqbgo9mrbgv0siuaqmbev1mq5v91oa.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kasirpro.app",
+            "certificate_hash": "04feaa86bca3665d8a7e605fbbd50301fd731ea9"
+          }
+        },
+        {
+          "client_id": "357452625370-c0c7mqnmhodoebtq4e3323ocfsp3ituo.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyCvfqoisyM4y2fC4nyG-bRAr3MeTjoCYeA"
@@ -20,7 +49,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "357452625370-c0c7mqnmhodoebtq4e3323ocfsp3ituo.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }
