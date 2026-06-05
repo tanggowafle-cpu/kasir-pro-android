@@ -63,6 +63,9 @@ interface KasirDao {
     @Query("SELECT * FROM products ORDER BY nama ASC")
     fun getAllProducts(): Flow<List<ProductEntity>>
 
+    @Query("SELECT * FROM products")
+    suspend fun getAllProductsRaw(): List<ProductEntity>
+
     @Query("SELECT * FROM products WHERE id = :id LIMIT 1")
     suspend fun getProductById(id: String): ProductEntity?
 
@@ -92,6 +95,9 @@ interface KasirDao {
     @Query("SELECT * FROM debts ORDER BY createdAt DESC")
     fun getAllDebts(): Flow<List<DebtEntity>>
 
+    @Query("SELECT * FROM debts")
+    suspend fun getAllDebtsRaw(): List<DebtEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDebt(debt: DebtEntity)
 
@@ -101,6 +107,9 @@ interface KasirDao {
     // === Customers ===
     @Query("SELECT * FROM customers ORDER BY nama ASC")
     fun getAllCustomers(): Flow<List<CustomerEntity>>
+
+    @Query("SELECT * FROM customers")
+    suspend fun getAllCustomersRaw(): List<CustomerEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCustomer(customer: CustomerEntity)
@@ -115,6 +124,9 @@ interface KasirDao {
     // === Promos ===
     @Query("SELECT * FROM promos ORDER BY createdAt DESC")
     fun getAllPromos(): Flow<List<PromoEntity>>
+
+    @Query("SELECT * FROM promos")
+    suspend fun getAllPromosRaw(): List<PromoEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertPromo(promo: PromoEntity)

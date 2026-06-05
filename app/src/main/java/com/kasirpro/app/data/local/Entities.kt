@@ -23,6 +23,8 @@ data class BusinessEntity(
     val ownerId: String,
     val namaBisnis: String,
     val logoUrl: String?,
+    val alamat: String? = null,
+    val noTelpon: String? = null,
     val createdAt: Long = System.currentTimeMillis()
 )
 
@@ -50,6 +52,7 @@ data class ProductEntity(
     val barcode: String?,
     val fotoUrl: String?,
     val varianRaw: String? = "", // JSON payload string containing variant definitions
+    val satuan: String = "Pcs",
     val isActive: Boolean = true,
     val createdAt: Long = System.currentTimeMillis()
 )
@@ -96,6 +99,7 @@ data class CustomerEntity(
     val nomorHp: String,
     val totalPoin: Int = 0,
     val totalTransaksi: Int = 0,
+    val alamat: String? = null,
     val createdAt: Long = System.currentTimeMillis()
 )
 

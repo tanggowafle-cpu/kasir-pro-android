@@ -12,6 +12,20 @@ import java.util.UUID
 class KasirViewModel(application: Application) : AndroidViewModel(application) {
     val repository = KasirRepository(application)
 
+    init {
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(5000L) // Wait slightly after startup
+            while (true) {
+                try {
+                    repository.synchronizeOfflineData()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+                kotlinx.coroutines.delay(30000L) // Loop every 30 seconds
+            }
+        }
+    }
+
     // UI Session flags
     val currentUser = repository.currentUser.stateIn(
         viewModelScope, SharingStarted.Eagerly, null
@@ -201,7 +215,8 @@ class KasirViewModel(application: Application) : AndroidViewModel(application) {
                     jumlah = 1,
                     harga = finalPrice,
                     varianSelected = variantName,
-                    diskon = 0.0
+                    diskon = 0.0,
+                    satuan = product.satuan
                 )
             )
         }
@@ -328,7 +343,8 @@ class KasirViewModel(application: Application) : AndroidViewModel(application) {
         stokMinimum: Int,
         barcode: String?,
         fotoUrl: String?,
-        varianList: List<ProductVariant>
+        varianList: List<ProductVariant>,
+        satuan: String = "Pcs"
     ) {
         val user = currentUser.value
         val isPremium = user?.subscriptionStatus == "premium"
@@ -340,7 +356,39 @@ class KasirViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            repository.insertProduct(nama, kategori, hargaJual, hargaModal, stok, stokMinimum, barcode, fotoUrl, varianList)
+            repository.insertProduct(nama, kategori, hargaJual, hargaModal, stok, stokMinimum, barcode, fotoUrl, varianList, satuan)
+        }
+    }
+
+    fun addProductWithBranch(
+        id: String = UUID.randomUUID().toString(),
+        nama: String,
+        kategori: String,
+        hargaJual: Double,
+        hargaModal: Double,
+        stok: Int,
+        stokMinimum: Int,
+        barcode: String?,
+        fotoUrl: String?,
+        branchId: String,
+        satuan: String = "Pcs",
+        onComplete: (Boolean) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val success = repository.insertProductWithBranch(
+                id = id,
+                nama = nama,
+                kategori = kategori,
+                hargaJual = hargaJual,
+                hargaModal = hargaModal,
+                stok = stok,
+                stokMinimum = stokMinimum,
+                barcode = barcode,
+                fotoUrl = fotoUrl,
+                branchId = branchId,
+                satuan = satuan
+            )
+            onComplete(success)
         }
     }
 
@@ -365,6 +413,11 @@ class KasirViewModel(application: Application) : AndroidViewModel(application) {
 
     // PROMOS
     fun addPromo(nama: String, tipe: String, nilai: Double, minTx: Double, kode: String, durationDays: Int) {
+        val isPremium = currentUser.value?.subscriptionStatus == "premium"
+        if (!isPremium) {
+            showLimitPopup.value = "Fitur Promo & Voucher Kupon hanya untuk pengguna Premium. Upgrade sekarang!"
+            return
+        }
         viewModelScope.launch {
             val berlakuSampai = System.currentTimeMillis() + (durationDays * 24L * 60 * 60 * 1000)
             repository.addPromo(nama, tipe, nilai, minTx, kode, berlakuSampai)
@@ -372,6 +425,11 @@ class KasirViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun togglePromo(id: String, active: Boolean) {
+        val isPremium = currentUser.value?.subscriptionStatus == "premium"
+        if (!isPremium) {
+            showLimitPopup.value = "Fitur Promo & Voucher Kupon hanya untuk pengguna Premium. Upgrade sekarang!"
+            return
+        }
         viewModelScope.launch {
             repository.togglePromo(id, active)
         }
@@ -432,14 +490,14 @@ class KasirViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // CUSTOMERS WITH FREE TIER VALIDATION
-    fun addCustomer(nama: String, hp: String) {
+    fun addCustomer(nama: String, hp: String, alamat: String? = null) {
         val isPremium = currentUser.value?.subscriptionStatus == "premium"
         if (!isPremium) {
             showLimitPopup.value = "Fitur Database Pelanggan & Loyalty Poin hanya untuk pengguna Premium!"
             return
         }
         viewModelScope.launch {
-            repository.addCustomer(nama, hp)
+            repository.addCustomer(nama, hp, alamat)
         }
     }
 
@@ -463,10 +521,10 @@ class KasirViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // SUB UPGRADE SIMULATION
-    fun upgradeToPremium() {
+    fun upgradeToPremium(isYearly: Boolean = false) {
         viewModelScope.launch {
             val user = currentUser.value ?: return@launch
-            repository.upgradeUserSubscription(user.uid, "premium")
+            repository.upgradeUserSubscription(user.uid, "premium", isYearly)
             activeScreen.value = "home"
         }
     }
@@ -507,6 +565,28 @@ class KasirViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setLanguage(lang: String) {
         repository.setLanguage(lang)
+    }
+
+    fun updateBusinessProfile(namaBisnis: String, alamat: String?, noTelpon: String?, logoUrl: String?, onComplete: () -> Unit = {}) {
+        viewModelScope.launch {
+            repository.updateBusinessProfile(namaBisnis, alamat, noTelpon, logoUrl)
+            onComplete()
+        }
+    }
+
+    fun getOwnerVerificationCode(): String {
+        return repository.getOwnerVerificationCode()
+    }
+
+    fun saveOwnerVerificationCode(code: String) {
+        repository.saveOwnerVerificationCode(code)
+    }
+
+    fun correctTransaction(correctedTx: TransactionEntity, onComplete: () -> Unit = {}) {
+        viewModelScope.launch {
+            repository.correctTransaction(correctedTx)
+            onComplete()
+        }
     }
 
     fun logout() {

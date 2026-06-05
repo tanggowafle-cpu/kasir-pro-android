@@ -47,7 +47,6 @@ class MainActivity : ComponentActivity() {
 
                             if (activeScreenState in allowedScreens) {
                                 NavigationBar(
-                                    modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars),
                                     containerColor = MaterialTheme.colorScheme.surface
                                 ) {
                                     if (!isKasir) {

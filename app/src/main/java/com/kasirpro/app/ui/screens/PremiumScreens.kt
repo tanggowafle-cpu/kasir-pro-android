@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kasirpro.app.data.local.*
 import com.kasirpro.app.ui.viewmodel.KasirViewModel
+import com.kasirpro.app.data.repository.ShiftReport
 import com.kasirpro.app.ui.theme.*
 import java.text.NumberFormat
 import java.util.Locale
@@ -38,7 +39,7 @@ fun PremiumScreens(viewModel: KasirViewModel) {
     val user by viewModel.currentUser.collectAsState()
     val isPremium = user?.subscriptionStatus == "premium"
 
-    var selectedModule by remember { mutableStateOf("LAPORAN") } // LAPORAN, HUTANG, PELANGGAN, PROMO, CABANG, KASIR
+    var selectedModule by remember { mutableStateOf("LAPORAN") } // LAPORAN, HUTANG
 
     val context = LocalContext.current
 
@@ -68,7 +69,7 @@ fun PremiumScreens(viewModel: KasirViewModel) {
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Menu Laporan Keuangan, Kelola Hutang, Multi-Cabang, Manajemen Promo, dan Loyalty Pelanggan hanya tersedia untuk pelanggan Premium Pro.",
+                    text = "Menu Laporan Keuangan, dan Kelola Hutang hanya tersedia untuk pelanggan Premium Pro.",
                     color = Color.LightGray,
                     textAlign = TextAlign.Center,
                     fontSize = 14.sp
@@ -91,6 +92,7 @@ fun PremiumScreens(viewModel: KasirViewModel) {
     } else {
         // Premium user layout
         Scaffold(
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
             topBar = {
                 TopAppBar(
                     title = { Text("Area Premium Pro", fontWeight = FontWeight.Bold) },
@@ -105,26 +107,20 @@ fun PremiumScreens(viewModel: KasirViewModel) {
                 // Secondary horizontal controller for selecting current premium modules
                 Card(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.navigationBars),
+                        .fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     shape = RoundedCornerShape(0.dp)
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(8.dp)
-                            .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                            .padding(8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         listOf(
                             "LAPORAN" to Icons.Default.BarChart,
-                            "HUTANG" to Icons.Default.PendingActions,
-                            "PELANGGAN" to Icons.Default.People,
-                            "PROMO" to Icons.Default.LocalActivity,
-                            "CABANG" to Icons.Default.AddBusiness,
-                            "KASIR" to Icons.Default.Badge
+                            "HUTANG" to Icons.Default.PendingActions
                         ).forEach { (mod, icon) ->
                             val isSel = selectedModule == mod
                             Button(
@@ -132,9 +128,10 @@ fun PremiumScreens(viewModel: KasirViewModel) {
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = if (isSel) OrangePrimary else MaterialTheme.colorScheme.surface
                                 ),
+                                modifier = Modifier.weight(1f),
                                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                                 shape = RoundedCornerShape(16.dp)
-                            ) {
+                              ) {
                                 Icon(imageVector = icon, contentDescription = null, tint = if (isSel) Color.White else OrangePrimary, modifier = Modifier.size(16.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(mod, fontSize = 11.sp, color = if (isSel) Color.White else MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Bold)
@@ -153,41 +150,216 @@ fun PremiumScreens(viewModel: KasirViewModel) {
                 when (selectedModule) {
                     "LAPORAN" -> PremiumLaporanTab(viewModel)
                     "HUTANG" -> PremiumHutangTab(viewModel)
-                    "PELANGGAN" -> PremiumPelangganTab(viewModel)
-                    "PROMO" -> PremiumPromoTab(viewModel)
-                    "CABANG" -> PremiumCabangTab(viewModel)
-                    "KASIR" -> PremiumKasirTab(viewModel)
                 }
             }
         }
     }
 }
 
+data class ExpenseItem(
+    val id: String,
+    val amount: Double,
+    val createdAt: Long
+)
+
 // ==== 1. LAPORAN KEUNGAN ====
 @Composable
 fun PremiumLaporanTab(viewModel: KasirViewModel) {
     val txs by viewModel.transactions.collectAsState()
     val branchesList by viewModel.branches.collectAsState()
+    val productsList by viewModel.products.collectAsState()
+    val user by viewModel.currentUser.collectAsState()
     
     val idrFormatter = NumberFormat.getCurrencyInstance(Locale("id", "ID"))
     idrFormatter.maximumFractionDigits = 0
 
     var selectedBranchId by remember { mutableStateOf("all") }
     var selectedCashierId by remember { mutableStateOf("all") }
-    var reportInterval by remember { mutableStateOf("BULANAN") } // HARIAN, BULANAN, TAHUNAN
+    var reportInterval by remember { mutableStateOf("BULANAN") } // HARIAN, MINGGUAN, BULANAN
 
-    // Filter transactions based on selection
+    // Fetch user owner ID
+    val ownerId = remember(user) {
+        if (user?.role == "kasir") user?.ownerId else user?.uid
+    }
+
+    // Dynamic, Real-time Expenses and Shifts from Firebase Firestore
+    val expensesState = remember { mutableStateOf<List<ExpenseItem>>(emptyList()) }
+    val shiftsState = remember { mutableStateOf<List<ShiftReport>>(emptyList()) }
+
+    DisposableEffect(ownerId) {
+        if (ownerId.isNullOrBlank()) return@DisposableEffect onDispose {}
+        
+        val db = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+        
+        // 1. Real-time Expenses Snapshot Listener
+        val expensesListener = db.collection("expenses")
+            .whereEqualTo("ownerId", ownerId)
+            .addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    val list = snapshot.documents.map { doc ->
+                        val amt = doc.getDouble("amount") 
+                            ?: doc.getDouble("jumlah") 
+                            ?: doc.getDouble("nominal") 
+                            ?: doc.getLong("amount")?.toDouble() 
+                            ?: doc.getLong("jumlah")?.toDouble() 
+                            ?: doc.getLong("nominal")?.toDouble() 
+                            ?: 0.0
+                        val date = doc.getLong("createdAt") 
+                            ?: doc.getLong("date") 
+                            ?: doc.getTimestamp("createdAt")?.seconds?.times(1000) 
+                            ?: doc.getTimestamp("date")?.seconds?.times(1000) 
+                            ?: System.currentTimeMillis()
+                        ExpenseItem(doc.id, amt, date)
+                    }
+                    expensesState.value = list
+                }
+            }
+            
+        // 2. Real-time Shifts Snapshot Listener
+        val shiftsListener = db.collection("shifts")
+            .whereEqualTo("ownerId", ownerId)
+            .addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null) {
+                    val list = snapshot.documents.mapNotNull { doc ->
+                        val map = doc.data ?: return@mapNotNull null
+                        ShiftReport.fromMap(map.toMutableMap().apply { put("id", doc.id) })
+                    }.sortedByDescending { it.startTime }
+                    shiftsState.value = list
+                }
+            }
+            
+        onDispose {
+            expensesListener.remove()
+            shiftsListener.remove()
+        }
+    }
+
+    // Map Product ID to Cost Price (hargaModal) for perfect Profit calculation
+    val productCostMap = remember(productsList) {
+        productsList.associate { it.id to it.hargaModal }
+    }
+
+    // Time ranges definitions
+    val now = System.currentTimeMillis()
+    val calendar = java.util.Calendar.getInstance()
+
+    // Today start (Harian)
+    calendar.set(java.util.Calendar.HOUR_OF_DAY, 0)
+    calendar.set(java.util.Calendar.MINUTE, 0)
+    calendar.set(java.util.Calendar.SECOND, 0)
+    calendar.set(java.util.Calendar.MILLISECOND, 0)
+    val todayStart = calendar.timeInMillis
+
+    // 7 Days ago (Mingguan)
+    val sevenDaysAgoStart = now - (7L * 24 * 60 * 60 * 1000)
+
+    // Month start (Bulan ini)
+    val monthCalendar = java.util.Calendar.getInstance()
+    monthCalendar.set(java.util.Calendar.DAY_OF_MONTH, 1)
+    monthCalendar.set(java.util.Calendar.HOUR_OF_DAY, 0)
+    monthCalendar.set(java.util.Calendar.MINUTE, 0)
+    monthCalendar.set(java.util.Calendar.SECOND, 0)
+    monthCalendar.set(java.util.Calendar.MILLISECOND, 0)
+    val monthStart = monthCalendar.timeInMillis
+
+    // Filter transaction lists based on intervals and selectors
     val filtered = txs.filter { tx ->
         val matchBranch = (selectedBranchId == "all" || tx.branchId == selectedBranchId)
         val matchCashier = (selectedCashierId == "all" || tx.kasirId == selectedCashierId)
-        matchBranch && matchCashier
+        
+        val matchInterval = when (reportInterval) {
+            "HARIAN" -> tx.createdAt >= todayStart
+            "MINGGUAN" -> tx.createdAt >= sevenDaysAgoStart
+            "BULANAN" -> tx.createdAt >= monthStart
+            else -> true
+        }
+        matchBranch && matchCashier && matchInterval
     }
 
+    // Calculate Pendapatan, HPP, and Keuntungan from products in transactions
     val finalIncome = filtered.sumOf { it.total }
-    val calculatedCapital = filtered.sumOf { it.subtotal * 0.55 } // Modal cost estimated mapping
+    
+    var calculatedCapital = 0.0
+    filtered.forEach { tx ->
+        var txHpp = 0.0
+        val itemsSplit = tx.itemsRaw.split(";").filter { it.isNotBlank() }
+        itemsSplit.forEach { line ->
+            val parts = line.split(":")
+            if (parts.size >= 3) {
+                val pId = parts[0]
+                val qty = parts[2].toIntOrNull() ?: 1
+                val sellPrice = parts.getOrNull(3)?.toDoubleOrNull() ?: 0.0
+                val diskon = parts.getOrNull(5)?.toDoubleOrNull() ?: 0.0
+                val finalItemPrice = sellPrice - diskon
+                
+                val itemCost = productCostMap[pId] ?: (finalItemPrice * 0.55)
+                txHpp += itemCost * qty
+            }
+        }
+        if (txHpp == 0.0 && tx.total > 0.0) {
+            txHpp = tx.total * 0.55
+        }
+        calculatedCapital += txHpp
+    }
+
     val calculatedNetProfit = finalIncome - calculatedCapital
+
+    // Filter historical expenses based on interval
+    val filteredExpenses = expensesState.value.filter { exp ->
+        when (reportInterval) {
+            "HARIAN" -> exp.createdAt >= todayStart
+            "MINGGUAN" -> exp.createdAt >= sevenDaysAgoStart
+            "BULANAN" -> exp.createdAt >= monthStart
+            else -> true
+        }
+    }
+    val totalExpensesValue = filteredExpenses.sumOf { it.amount }
+    val finalFinancialNet = calculatedNetProfit - totalExpensesValue
+
     val countTx = filtered.size
     val averageBasket = if (countTx > 0) finalIncome / countTx else 0.0
+
+    // Top Selling Products parsed dynamically from itemsRaw
+    val topProducts = remember(filtered) {
+        val map = mutableMapOf<String, Int>()
+        filtered.forEach { tx ->
+            val itemsSplit = tx.itemsRaw.split(";").filter { it.isNotBlank() }
+            itemsSplit.forEach { line ->
+                val parts = line.split(":")
+                if (parts.size >= 2) {
+                    val name = parts[1]
+                    val qty = parts.getOrNull(2)?.toIntOrNull() ?: 1
+                    map[name] = (map[name] ?: 0) + qty
+                }
+            }
+        }
+        map.toList().sortedByDescending { it.second }.take(4)
+    }
+
+    // Daily Sales Graph (7 Days history) from real Firestore/Room transactions
+    val dailyIncomeList = remember(filtered) {
+        val list = mutableListOf<Pair<String, Double>>()
+        val sdf = java.text.SimpleDateFormat("dd MMM", java.util.Locale("id", "ID"))
+        for (i in 6 downTo 0) {
+            val dateCal = java.util.Calendar.getInstance()
+            dateCal.add(java.util.Calendar.DAY_OF_YEAR, -i)
+            
+            dateCal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+            dateCal.set(java.util.Calendar.MINUTE, 0)
+            dateCal.set(java.util.Calendar.SECOND, 0)
+            dateCal.set(java.util.Calendar.MILLISECOND, 0)
+            val dayStart = dateCal.timeInMillis
+            
+            dateCal.set(java.util.Calendar.HOUR_OF_DAY, 23)
+            dateCal.set(java.util.Calendar.MINUTE, 59)
+            dateCal.set(java.util.Calendar.SECOND, 59)
+            val dayEnd = dateCal.timeInMillis
+            
+            val totalForDay = filtered.filter { it.createdAt in dayStart..dayEnd }.sumOf { it.total }
+            list.add(sdf.format(dateCal.time) to totalForDay)
+        }
+        list
+    }
 
     val context = LocalContext.current
 
@@ -283,7 +455,7 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
         // Interval toggles
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("HARIAN", "BULANAN", "TAHUNAN").forEach { mode ->
+                listOf("HARIAN", "MINGGUAN", "BULANAN").forEach { mode ->
                     val sel = reportInterval == mode
                     Card(
                         modifier = Modifier
@@ -320,8 +492,12 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
                             Text(idrFormatter.format(calculatedCapital), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                         }
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("KEUNTUNGAN BERSIH (NET):", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Gray)
-                            Text(idrFormatter.format(calculatedNetProfit), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF15803D))
+                            Text("Total Pengeluaran (Beban):", fontSize = 11.sp, color = Color.Gray)
+                            Text(idrFormatter.format(totalExpensesValue), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFB91C1C))
+                        }
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Laba Bersih Finansial:", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Gray)
+                            Text(idrFormatter.format(finalFinancialNet), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (finalFinancialNet >= 0) Color(0xFF15803D) else Color(0xFFB91C1C))
                         }
                     }
                 }
@@ -343,7 +519,7 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
             }
         }
 
-        // 7. Laporan akhir bulan displays breakdown per cabang dan per kasir
+        // Laporan breakdown per cabang dan per kasir
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -365,7 +541,7 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
                     Text("Penjualan Per Cabang:", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = OrangePrimary)
                     Spacer(modifier = Modifier.height(6.dp))
                     
-                    val branchGroups = txs.groupBy { it.branchId }
+                    val branchGroups = filtered.groupBy { it.branchId }
                     if (branchGroups.isEmpty()) {
                         Text("Belum ada omset penjualan cabang.", fontSize = 11.sp, color = Color.Gray)
                     } else {
@@ -393,7 +569,7 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
                     Text("Penjualan Per Staf Kasir:", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = OrangePrimary)
                     Spacer(modifier = Modifier.height(6.dp))
                     
-                    val cashierGroups = txs.groupBy { it.kasirId to it.kasirNama }
+                    val cashierGroups = filtered.groupBy { it.kasirId to it.kasirNama }
                     if (cashierGroups.isEmpty()) {
                         Text("Belum ada omset penjualan kasir.", fontSize = 11.sp, color = Color.Gray)
                     } else {
@@ -418,11 +594,10 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
             }
         }
 
-        // === CASHER SHIFT HISTORICAL TRACKING ===
+        // === REALTIME CASHER SHIFT HISTORICAL TRACKING ===
         item {
-            val allShifts by viewModel.allShifts.collectAsState()
-            val filteredShifts = remember(allShifts, selectedBranchId, selectedCashierId) {
-                allShifts.filter { shift ->
+            val filteredShifts = remember(shiftsState.value, selectedBranchId, selectedCashierId) {
+                shiftsState.value.filter { shift ->
                     val matchBranch = (selectedBranchId == "all" || shift.branchId == selectedBranchId)
                     val matchCashier = (selectedCashierId == "all" || shift.cashierId == selectedCashierId)
                     matchBranch && matchCashier
@@ -443,7 +618,7 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
                         Text("Riwayat Laporan Shift Kasir", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         Icon(imageVector = Icons.Default.SupervisorAccount, contentDescription = null, tint = OrangePrimary)
                     }
-                    Text("Pantau uang modal awal, omset tunai/non-tunai, dan pencocokan uang kas fisik di laci per sesi kasir.", fontSize = 11.sp, color = Color.Gray)
+                    Text("Pantau uang modal awal, omset tunai/non-tunai, dan pencocokan uang kas fisik di laci per sesi kasir langsung dari Firestore.", fontSize = 11.sp, color = Color.Gray)
 
                     HorizontalDivider()
 
@@ -483,19 +658,15 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
 
                                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                         Text("Mulai Shift:", fontSize = 11.sp, color = Color.Gray)
-                                        Text(remember(shift) {
-                                            val sdf = java.text.SimpleDateFormat("dd MMM, HH:mm", java.util.Locale("id", "ID"))
-                                            sdf.format(java.util.Date(shift.startTime))
-                                        }, fontSize = 11.sp)
+                                        val startStr = java.text.SimpleDateFormat("dd MMM, HH:mm", java.util.Locale("id", "ID")).format(java.util.Date(shift.startTime))
+                                        Text(startStr, fontSize = 11.sp)
                                     }
 
                                     if (shift.endTime != null) {
                                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                             Text("Selesai Shift:", fontSize = 11.sp, color = Color.Gray)
-                                            Text(remember(shift) {
-                                                val sdf = java.text.SimpleDateFormat("dd MMM, HH:mm", java.util.Locale("id", "ID"))
-                                                sdf.format(java.util.Date(shift.endTime))
-                                            }, fontSize = 11.sp)
+                                            val endStr = java.text.SimpleDateFormat("dd MMM, HH:mm", java.util.Locale("id", "ID")).format(java.util.Date(shift.endTime))
+                                            Text(endStr, fontSize = 11.sp)
                                         }
                                     }
 
@@ -528,7 +699,7 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
             }
         }
 
-        // Grafik Bar Terlaris Simulated Canvas Panel
+        // Grafik real pendapatan (7 Hari terakhir)
         item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
@@ -537,33 +708,96 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Grafik Penjualan Terlaris", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("Grafik Pendapatan Harian (7 Hari Terakhir)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Icon(imageVector = Icons.Default.TrendingUp, contentDescription = null, tint = OrangePrimary)
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    val maxIncome = dailyIncomeList.maxOfOrNull { it.second } ?: 1.0
+                    
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(130.dp)
+                            .padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        dailyIncomeList.forEach { (dateStr, income) ->
+                            val barHeightPercent = if (maxIncome > 0) (income / maxIncome).toFloat().coerceIn(0.05f, 1f) else 0.05f
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(
+                                    text = if (income > 0) {
+                                        if (income >= 1_000_000) String.format("%.1fM", income / 1_000_000)
+                                        else if (income >= 1_000) String.format("%.0fK", income / 1_000)
+                                        else String.format("%.0f", income)
+                                    } else "",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = OrangePrimary
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.6f)
+                                        .fillMaxHeight(barHeightPercent)
+                                        .clip(RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp))
+                                        .background(OrangePrimary)
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(text = dateStr, fontSize = 8.sp, color = Color.Gray, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Grafik Penjualan Terlaris Real
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Grafik Produk Terlaris (Qty)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         Icon(imageVector = Icons.Default.Leaderboard, contentDescription = null, tint = OrangePrimary)
                     }
                     Spacer(modifier = Modifier.height(12.dp))
                     
-                    // Simple interactive bar graph rows
-                    listOf(
-                        "Kopi Gula Aren" to 0.9f,
-                        "Roti Bakar Cokelat" to 0.65f,
-                        "Indomie Double Pedas" to 0.4f
-                    ).forEach { (pName, percent) ->
-                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                            Text(pName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(14.dp)
-                                    .clip(RoundedCornerShape(7.dp))
-                                    .background(Color.LightGray.copy(alpha = 0.3f))
-                            ) {
+                    if (topProducts.isEmpty()) {
+                        Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                            Text("Belum ada data produk terlaris di interval ini.", fontSize = 11.sp, color = Color.Gray)
+                        }
+                    } else {
+                        val maxQty = topProducts.maxOfOrNull { it.second } ?: 1
+                        topProducts.forEach { (pName, qty) ->
+                            val percent = if (maxQty > 0) qty.toFloat() / maxQty else 0f
+                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(pName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("$qty Unit", fontSize = 11.sp, color = OrangePrimary, fontWeight = FontWeight.Bold)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Box(
                                     modifier = Modifier
-                                        .fillMaxWidth(percent)
-                                        .fillMaxHeight()
-                                        .background(OrangePrimary)
-                                )
+                                        .fillMaxWidth()
+                                        .height(14.dp)
+                                        .clip(RoundedCornerShape(7.dp))
+                                        .background(Color.LightGray.copy(alpha = 0.3f))
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth(percent.coerceIn(0.01f, 1f))
+                                            .fillMaxHeight()
+                                            .background(OrangePrimary)
+                                    )
+                                }
                             }
                         }
                     }
@@ -575,10 +809,9 @@ fun PremiumLaporanTab(viewModel: KasirViewModel) {
         item {
             Button(
                 onClick = {
-                    // Simulates PDF compilation & sharing intent logs
                     val shareIntent = Intent(Intent.ACTION_SEND).apply {
                         type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, "KASIR PRO - LAPORAN KEUANGAN BULANAN\nToko: Toko Kasir Pro Utama\n\nTotal Omset: ${idrFormatter.format(finalIncome)}\nLaba Bersih: ${idrFormatter.format(calculatedNetProfit)}")
+                        putExtra(Intent.EXTRA_TEXT, "KASIR PRO - LAPORAN KEUANGAN (${reportInterval})\nToko: ${user?.nama ?: "Toko Utama"}\n\nTotal Omset: ${idrFormatter.format(finalIncome)}\nTotal HPP: ${idrFormatter.format(calculatedCapital)}\nTotal Pengeluaran: ${idrFormatter.format(totalExpensesValue)}\nLaba Bersih Real: ${idrFormatter.format(finalFinancialNet)}")
                     }
                     context.startActivity(Intent.createChooser(shareIntent, "Export PDF Laporan Keuangan"))
                     Toast.makeText(context, "Dokumen PDF export sukses dibuat!", Toast.LENGTH_SHORT).show()

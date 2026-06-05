@@ -10,6 +10,7 @@ import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
 import com.google.firebase.auth.FirebaseAuthInvalidUserException
 import com.google.firebase.auth.FirebaseAuthUserCollisionException
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.*
@@ -40,7 +41,8 @@ data class TransactionItem(
     val jumlah: Int,
     val harga: Double,
     val varianSelected: String?,
-    val diskon: Double
+    val diskon: Double,
+    val satuan: String = "Pcs"
 ) {
     fun subtotal(): Double = (harga - diskon) * jumlah
 }
@@ -65,6 +67,8 @@ fun BusinessEntity.toMap(): Map<String, Any?> = mapOf(
     "ownerId" to ownerId,
     "namaBisnis" to namaBisnis,
     "logoUrl" to logoUrl,
+    "alamat" to alamat,
+    "noTelpon" to noTelpon,
     "createdAt" to createdAt
 )
 
@@ -91,7 +95,9 @@ fun ProductEntity.toMap(): Map<String, Any?> = mapOf(
     "stokMinimum" to stokMinimum,
     "barcode" to barcode,
     "fotoUrl" to fotoUrl,
+    "photoPath" to fotoUrl,
     "varianRaw" to varianRaw,
+    "satuan" to satuan,
     "isActive" to isActive,
     "createdAt" to createdAt
 )
@@ -138,6 +144,7 @@ fun CustomerEntity.toMap(): Map<String, Any?> = mapOf(
     "nomorHp" to nomorHp,
     "totalPoin" to totalPoin,
     "totalTransaksi" to totalTransaksi,
+    "alamat" to alamat,
     "createdAt" to createdAt
 )
 
@@ -202,6 +209,14 @@ class KasirRepository(private val context: Context) {
         _loggedInUid.value = uid
     }
 
+    fun getOwnerVerificationCode(): String {
+        return prefs.getString("owner_verification_code", "1234") ?: "1234"
+    }
+
+    fun saveOwnerVerificationCode(code: String) {
+        prefs.edit().putString("owner_verification_code", code).apply()
+    }
+
     init {
         try {
             val savedUid = prefs.getString("logged_in_uid", null)
@@ -252,6 +267,22 @@ class KasirRepository(private val context: Context) {
     suspend fun getCurrentUserRaw(): UserEntity? = dao.getCurrentUserRaw()
 
     suspend fun getCurrentBusinessRaw(): BusinessEntity? = dao.getCurrentBusinessRaw()
+
+    suspend fun updateBusinessProfile(namaBisnis: String, alamat: String?, noTelpon: String?, logoUrl: String?) {
+        val biz = getCurrentBusinessRaw() ?: return
+        val updated = biz.copy(
+            namaBisnis = namaBisnis,
+            alamat = alamat,
+            noTelpon = noTelpon,
+            logoUrl = logoUrl
+        )
+        dao.insertBusiness(updated)
+        try {
+            firestore.collection("businesses").document(updated.id).set(updated.toMap()).await()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
 
     suspend fun getResolvedBusinessId(): String {
         val currentBiz = dao.getCurrentBusinessRaw()
@@ -399,29 +430,55 @@ class KasirRepository(private val context: Context) {
         // 1. Try to check if input is NOT an email (i.e. cashier login by custom username)
         if (!cleanInput.contains("@")) {
             try {
+                android.util.Log.d("KASIR_LOGIN", "Searching for cashier with username: $cleanInput")
+
+                // Since firestore rules require request.auth != null, we sign in anonymously first.
+                if (auth.currentUser == null) {
+                    try {
+                        auth.signInAnonymously().await()
+                        android.util.Log.d("KASIR_LOGIN", "Successfully signed in anonymously for cashier search")
+                    } catch (ae: Exception) {
+                        android.util.Log.e("KASIR_LOGIN", "Failed to sign in anonymously: ${ae.localizedMessage}", ae)
+                    }
+                }
+
                 val querySnapshot = firestore.collection("cashiers")
                     .whereEqualTo("username", cleanInput)
                     .get()
                     .await()
                 
+                android.util.Log.d("KASIR_LOGIN", "Cashiers found: ${querySnapshot.size()}")
+                
                 if (querySnapshot.isEmpty) {
+                    android.util.Log.d("KASIR_LOGIN", "Login result: failed")
                     throw Exception("Username kasir tidak terdaftar.")
                 }
                 
-                // Find matching cashier by password
+                 // Find matching cashier by password
                 val cashierDoc = querySnapshot.documents.firstOrNull { it.getString("password") == pass }
                 if (cashierDoc == null) {
+                    android.util.Log.d("KASIR_LOGIN", "Login result: failed")
                     throw Exception("Password salah. Silakan coba lagi.")
                 }
 
                 val status = cashierDoc.getString("status") ?: "aktif"
                 if (status != "aktif") {
+                    android.util.Log.d("KASIR_LOGIN", "Login result: failed")
                     throw Exception("Akun kasir ini dinonaktifkan.")
                 }
 
                 val ownerId = cashierDoc.getString("ownerId") ?: "owner-uid"
                 val nama = cashierDoc.getString("cashierName") ?: cashierDoc.getString("nama") ?: "Kasir"
                 val branchId = cashierDoc.getString("branchId") ?: "branch-1-biz-$ownerId"
+                var subscriptionStatus = "free"
+                try {
+                    val ownerDoc = firestore.collection("users").document(ownerId).get().await()
+                    if (ownerDoc.exists()) {
+                        subscriptionStatus = ownerDoc.getString("subscriptionStatus") ?: "free"
+                    }
+                } catch (ex: Exception) {
+                    android.util.Log.e("KASIR_LOGIN", "Error fetching owner state in loginUser: ${ex.message}")
+                }
 
                 val cashierUser = UserEntity(
                     uid = cashierDoc.id,
@@ -430,7 +487,7 @@ class KasirRepository(private val context: Context) {
                     role = "kasir",
                     ownerId = ownerId,
                     assignedBranchId = branchId,
-                    subscriptionStatus = "free",
+                    subscriptionStatus = subscriptionStatus,
                     subscriptionStartDate = null,
                     subscriptionEndDate = null,
                     createdAt = cashierDoc.getLong("createdAt") ?: System.currentTimeMillis(),
@@ -448,12 +505,15 @@ class KasirRepository(private val context: Context) {
 
                 // Synchronize business elements for cashiers
                 try {
-                    syncFromFirestore()
+                    syncFromFirestore(cashierDoc.id)
                 } catch (s: Exception) {
                     s.printStackTrace()
                 }
+                
+                android.util.Log.d("KASIR_LOGIN", "Login result: success")
                 return true
             } catch (e: Exception) {
+                android.util.Log.d("KASIR_LOGIN", "Login result: failed")
                 if (e.message != null && (e.message!!.contains("Username") || e.message!!.contains("Password") || e.message!!.contains("dinonaktifkan"))) {
                     throw e
                 }
@@ -529,132 +589,150 @@ class KasirRepository(private val context: Context) {
         }
     }
 
-    suspend fun loginWithGoogle(idToken: String): Boolean {
-        try {
-            withContext(Dispatchers.IO) {
-                database.clearAllTables()
-            }
-        } catch (e: Exception) { e.printStackTrace() }
+data class GoogleLoginResult(
+    val success: Boolean,
+    val isNewUser: Boolean,
+    val role: String
+)
 
+    suspend fun loginWithGoogle(idToken: String): GoogleLoginResult {
         return try {
-            if (idToken == "sandbox-bypass") {
-                val finalUid = "google-offline-owner"
-                setLoggedInDeviceUser(finalUid)
-                val email = "sandbox.tester@kasirpro.id"
-                val namaUser = "Sandbox Tester"
-                val user = UserEntity(
-                    uid = finalUid,
-                    nama = namaUser,
-                    email = email,
-                    role = "owner",
-                    ownerId = null,
-                    assignedBranchId = null,
-                    subscriptionStatus = "free",
-                    subscriptionStartDate = null,
-                    subscriptionEndDate = null,
-                    createdAt = System.currentTimeMillis(),
-                    lastActiveAt = System.currentTimeMillis()
-                )
-                dao.insertUser(user)
-                return true
-            }
-            val credential = GoogleAuthProvider.getCredential(idToken, null)
-            val result = withTimeoutOrNull(10000L) {
-                auth.signInWithCredential(credential).await()
-            }
-            val firebaseUid = result?.user?.uid
+            val finalUid = if (idToken == "sandbox-bypass") "google-offline-owner" else null
             
-            // Always login successfully: if Firebase is blocked or offline, use a robust offline fallback UID
-            val finalUid = firebaseUid ?: "google-offline-owner"
-            setLoggedInDeviceUser(finalUid)
-            
-            val email = result?.user?.email ?: "google-user@kasirpro.id"
-            val namaUser = result?.user?.displayName ?: email.substringBefore("@").replaceFirstChar { it.uppercase() }
-            
-            // Read/Check Firestore profile or initialize it
-            val user = try {
-                val doc = if (finalUid != "google-offline-owner") {
-                    withTimeoutOrNull(4000L) {
-                        firestore.collection("users").document(finalUid).get().await()
-                    }
-                } else null
-                
-                if (doc != null && doc.exists()) {
-                    UserEntity(
-                        uid = finalUid,
-                        nama = doc.getString("nama") ?: namaUser,
-                        email = doc.getString("email") ?: email,
-                        role = doc.getString("role") ?: "owner",
-                        ownerId = doc.getString("ownerId"),
-                        assignedBranchId = doc.getString("assignedBranchId"),
-                        subscriptionStatus = doc.getString("subscriptionStatus") ?: "free",
-                        subscriptionStartDate = doc.getLong("subscriptionStartDate"),
-                        subscriptionEndDate = doc.getLong("subscriptionEndDate"),
-                        createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
-                        lastActiveAt = System.currentTimeMillis()
-                    )
-                } else {
-                    UserEntity(
-                        uid = finalUid,
-                        nama = namaUser,
-                        email = email,
-                        role = "owner",
-                        ownerId = null,
-                        assignedBranchId = null,
-                        subscriptionStatus = "free",
-                        subscriptionStartDate = null,
-                        subscriptionEndDate = null,
-                        createdAt = System.currentTimeMillis(),
-                        lastActiveAt = System.currentTimeMillis()
-                    )
+            val (resultUid, email, namaUser) = if (idToken == "sandbox-bypass") {
+                Triple("google-offline-owner", "sandbox.tester@kasirpro.id", "Sandbox Tester")
+            } else {
+                val credential = GoogleAuthProvider.getCredential(idToken, null)
+                val result = withTimeoutOrNull(10000L) {
+                    auth.signInWithCredential(credential).await()
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                UserEntity(
-                    uid = finalUid,
-                    nama = namaUser,
-                    email = email,
-                    role = "owner",
-                    ownerId = null,
-                    assignedBranchId = null,
-                    subscriptionStatus = "free",
-                    subscriptionStartDate = null,
-                    subscriptionEndDate = null,
-                    createdAt = System.currentTimeMillis(),
-                    lastActiveAt = System.currentTimeMillis()
-                )
+                val firebaseUid = result?.user?.uid ?: throw Exception("Auth failed or timed out")
+                val email = result?.user?.email ?: "google-user@kasirpro.id"
+                val namaUser = result?.user?.displayName ?: email.substringBefore("@").replaceFirstChar { it.uppercase() }
+                Triple(firebaseUid, email, namaUser)
             }
 
-            // Write configuration properties to firestore if online
-            if (finalUid != "google-offline-owner") {
+            setLoggedInDeviceUser(resultUid)
+            android.util.Log.d("AUTH", "User UID: ${resultUid}")
+
+            // 1. Check if user document already exists in Firestore users collection
+            var userExists = false
+            var existingUser: UserEntity? = null
+
+            if (resultUid != "google-offline-owner") {
                 try {
-                    withTimeoutOrNull(4000L) {
-                        firestore.collection("users").document(finalUid).set(user.toMap()).await()
+                    val doc = withTimeoutOrNull(5000L) {
+                        firestore.collection("users").document(resultUid).get().await()
+                    }
+                    if (doc != null && doc.exists()) {
+                        userExists = true
+                        android.util.Log.d("AUTH", "User exists in Firestore: true")
+                        existingUser = UserEntity(
+                            uid = resultUid,
+                            nama = doc.getString("nama") ?: namaUser,
+                            email = doc.getString("email") ?: email,
+                            role = doc.getString("role") ?: "owner",
+                            ownerId = doc.getString("ownerId"),
+                            assignedBranchId = doc.getString("assignedBranchId"),
+                            subscriptionStatus = doc.getString("subscriptionStatus") ?: "free",
+                            subscriptionStartDate = doc.getLong("subscriptionStartDate"),
+                            subscriptionEndDate = doc.getLong("subscriptionEndDate"),
+                            createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
+                            lastActiveAt = System.currentTimeMillis()
+                        )
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
+            } else {
+                // For sandbox offline fallbacks, check firestore document as well
+                try {
+                    val doc = withTimeoutOrNull(3000L) {
+                        firestore.collection("users").document(resultUid).get().await()
+                    }
+                    if (doc != null && doc.exists()) {
+                        userExists = true
+                        existingUser = UserEntity(
+                            uid = resultUid,
+                            nama = doc.getString("nama") ?: namaUser,
+                            email = doc.getString("email") ?: email,
+                            role = doc.getString("role") ?: "owner",
+                            ownerId = doc.getString("ownerId"),
+                            assignedBranchId = doc.getString("assignedBranchId"),
+                            subscriptionStatus = doc.getString("subscriptionStatus") ?: "free",
+                            subscriptionStartDate = doc.getLong("subscriptionStartDate"),
+                            subscriptionEndDate = doc.getLong("subscriptionEndDate"),
+                            createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
+                            lastActiveAt = System.currentTimeMillis()
+                        )
+                    }
+                } catch (e: Exception) {}
             }
-            
+
+            android.util.Log.d("AUTH", "User exists in Firestore: ${userExists}")
+
+            val user = if (userExists && existingUser != null) {
+                // User already exists online! Update lastActiveAt in Firestore
+                try {
+                    firestore.collection("users").document(resultUid).update("lastActiveAt", System.currentTimeMillis()).await()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+                existingUser.copy(lastActiveAt = System.currentTimeMillis())
+            } else {
+                // Truly a brand new user!
+                val newUser = UserEntity(
+                    uid = resultUid,
+                    nama = namaUser,
+                    email = email,
+                    role = "owner",
+                    ownerId = null,
+                    assignedBranchId = null,
+                    subscriptionStatus = "free",
+                    subscriptionStartDate = null,
+                    subscriptionEndDate = null,
+                    createdAt = System.currentTimeMillis(),
+                    lastActiveAt = System.currentTimeMillis()
+                )
+                // Write new user document to Firestore
+                if (resultUid != "google-offline-owner") {
+                    try {
+                        firestore.collection("users").document(resultUid).set(newUser.toMap()).await()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                newUser
+            }
+
             dao.clearUsers()
             dao.insertUser(user)
 
             try {
-                if (finalUid != "google-offline-owner") {
-                    syncFromFirestore()
+                if (resultUid != "google-offline-owner") {
+                    syncFromFirestore(resultUid)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-            true
+            GoogleLoginResult(
+                success = true,
+                isNewUser = !userExists,
+                role = user.role
+            )
         } catch (e: Exception) {
             e.printStackTrace()
-            false
+            GoogleLoginResult(
+                success = false,
+                isNewUser = false,
+                role = "owner"
+            )
         }
     }
 
     suspend fun logout() {
         try {
+            com.kasirpro.app.util.ImageHelper.clearCache()
             auth.signOut()
         } catch (e: Exception) { e.printStackTrace() }
         setLoggedInDeviceUser(null)
@@ -744,8 +822,9 @@ class KasirRepository(private val context: Context) {
                     stok = doc.getLong("stok")?.toInt() ?: 0,
                     stokMinimum = doc.getLong("stokMinimum")?.toInt() ?: 0,
                     barcode = doc.getString("barcode"),
-                    fotoUrl = doc.getString("fotoUrl"),
+                    fotoUrl = doc.getString("photoPath") ?: doc.getString("fotoUrl"),
                     varianRaw = doc.getString("varianRaw") ?: "",
+                    satuan = doc.getString("satuan") ?: "Pcs",
                     isActive = doc.getBoolean("isActive") ?: true,
                     createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
                 )
@@ -768,7 +847,8 @@ class KasirRepository(private val context: Context) {
         stokMinimum: Int,
         barcode: String?,
         fotoUrl: String?,
-        varianList: List<ProductVariant>
+        varianList: List<ProductVariant>,
+        satuan: String = "Pcs"
     ): Boolean {
         val varianString = varianList.joinToString(";") { "${it.nama}:${it.harga}" }
         val bizId = getResolvedBusinessId()
@@ -785,7 +865,8 @@ class KasirRepository(private val context: Context) {
             stokMinimum = stokMinimum,
             barcode = barcode,
             fotoUrl = fotoUrl,
-            varianRaw = varianString
+            varianRaw = varianString,
+            satuan = satuan
         )
         try {
             firestore.collection("products").document(product.id).set(product.toMap()).await()
@@ -802,6 +883,58 @@ class KasirRepository(private val context: Context) {
             stokSebelum = 0,
             stokSesudah = stok,
             keterangan = "Stok awal produk baru"
+        )
+        try {
+            firestore.collection("stock_history").document(hist.id).set(hist.toMap()).await()
+        } catch (e: Exception) { e.printStackTrace() }
+        dao.insertStockHistory(hist)
+        return true
+    }
+
+    suspend fun insertProductWithBranch(
+        id: String = UUID.randomUUID().toString(),
+        nama: String,
+        kategori: String,
+        hargaJual: Double,
+        hargaModal: Double,
+        stok: Int,
+        stokMinimum: Int,
+        barcode: String?,
+        fotoUrl: String?,
+        branchId: String,
+        satuan: String = "Pcs"
+    ): Boolean {
+        val bizId = getResolvedBusinessId()
+
+        val product = ProductEntity(
+            id = id,
+            businessId = bizId,
+            branchId = branchId,
+            nama = nama,
+            kategori = kategori,
+            hargaJual = hargaJual,
+            hargaModal = hargaModal,
+            stok = stok,
+            stokMinimum = stokMinimum,
+            barcode = barcode,
+            fotoUrl = fotoUrl,
+            varianRaw = "",
+            satuan = satuan
+        )
+        try {
+            firestore.collection("products").document(product.id).set(product.toMap()).await()
+        } catch (e: Exception) { e.printStackTrace() }
+        dao.insertProduct(product)
+
+        val hist = StockHistoryEntity(
+            id = UUID.randomUUID().toString(),
+            productId = product.id,
+            businessId = bizId,
+            tipe = "masuk",
+            jumlah = stok,
+            stokSebelum = 0,
+            stokSesudah = stok,
+            keterangan = "Stok awal bulk upload"
         )
         try {
             firestore.collection("stock_history").document(hist.id).set(hist.toMap()).await()
@@ -875,7 +1008,7 @@ class KasirRepository(private val context: Context) {
         pelangganId: String?
     ): TransactionEntity {
         val itemsString = items.joinToString(";") {
-            "${it.id}:${it.nama}:${it.jumlah}:${it.harga}:${it.varianSelected ?: ""}:${it.diskon}"
+            "${it.id}:${it.nama}:${it.jumlah}:${it.harga}:${it.varianSelected ?: ""}:${it.diskon}:${it.satuan}"
         }
 
         val currUser = currentUser.firstOrNull()
@@ -997,14 +1130,99 @@ class KasirRepository(private val context: Context) {
 
     // PERSISTENCE SYNC FOR OFFLINE MODE
     suspend fun synchronizeOfflineData(): Int {
-        val pending = dao.getOfflinePendingTransactions()
-        pending.forEach { trx ->
-            try {
-                firestore.collection("transactions").document(trx.id).set(trx.toMap()).await()
-                dao.markTransactionSynced(trx.id)
-            } catch (e: Exception) { e.printStackTrace() }
+        var syncCount = 0
+
+        // 1. Sync pending transactions
+        try {
+            val pending = dao.getOfflinePendingTransactions()
+            pending.forEach { trx ->
+                try {
+                    firestore.collection("transactions").document(trx.id).set(trx.toMap()).await()
+                    dao.markTransactionSynced(trx.id)
+                    syncCount++
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        // 2. Sync products, especially those with local-only photos
+        try {
+            val localProducts = dao.getAllProductsRaw()
+            val currentUser = dao.getCurrentUserRaw()
+            val ownerId = if (currentUser?.role == "kasir") currentUser.ownerId ?: "owner-main" else auth.currentUser?.uid ?: "owner-main"
+
+            localProducts.forEach { p ->
+                var updated = p
+                // Check if there is a local photo for this product
+                val localPhotoFile = java.io.File(context.filesDir, "product_photos/prod-${p.id}.jpg")
+                if (localPhotoFile.exists()) {
+                    try {
+                        val bytes = localPhotoFile.readBytes()
+                        val path = "products/$ownerId/${p.id}/photo.jpg"
+
+                        val storage = try {
+                            FirebaseStorage.getInstance("gs://kasir-pro-3b58b.firebasestorage.app")
+                        } catch (e: Exception) {
+                            try {
+                                FirebaseStorage.getInstance("gs://kasir-pro-3b58b.appspot.com")
+                            } catch (e2: Exception) {
+                                FirebaseStorage.getInstance()
+                            }
+                        }
+
+                        val ref = storage.reference.child(path)
+                        ref.putBytes(bytes).await()
+
+                        // Update product image state locally and to firestore
+                        updated = p.copy(fotoUrl = path)
+                        dao.insertProduct(updated)
+                        syncCount++
+                    } catch (uploadEx: Exception) {
+                        android.util.Log.e("OFFLINE_SYNC", "Failed to upload photo for product ${p.nama}: ${uploadEx.message}")
+                    }
+                }
+
+                // Push metadata to Firestore
+                try {
+                    firestore.collection("products").document(updated.id).set(updated.toMap()).await()
+                } catch (dbEx: Exception) {
+                    android.util.Log.e("OFFLINE_SYNC", "Failed to sync product ${updated.nama} to Firestore: ${dbEx.message}")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("OFFLINE_SYNC", "Failure during product sync: ${e.message}", e)
         }
-        return pending.size
+
+        // 3. Sync customers to Firestore
+        try {
+            val customers = dao.getAllCustomersRaw()
+            customers.forEach { c ->
+                try {
+                    firestore.collection("customers").document(c.id).set(c.toMap()).await()
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        // 4. Sync promos to Firestore
+        try {
+            val promos = dao.getAllPromosRaw()
+            promos.forEach { pr ->
+                try {
+                    firestore.collection("promos").document(pr.id).set(pr.toMap()).await()
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        // 5. Sync debts to Firestore
+        try {
+            val debts = dao.getAllDebtsRaw()
+            debts.forEach { d ->
+                try {
+                    firestore.collection("debts").document(d.id).set(d.toMap()).await()
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        return syncCount
     }
 
     // MULTI BRANCH MANAGEMENT
@@ -1131,7 +1349,7 @@ class KasirRepository(private val context: Context) {
     }
 
     // CUSTOMERS
-    suspend fun addCustomer(nama: String, nomorHp: String) {
+    suspend fun addCustomer(nama: String, nomorHp: String, alamat: String? = null) {
         val bizId = getResolvedBusinessId()
         val cust = CustomerEntity(
             id = UUID.randomUUID().toString(),
@@ -1139,7 +1357,8 @@ class KasirRepository(private val context: Context) {
             nama = nama,
             nomorHp = nomorHp,
             totalPoin = 0,
-            totalTransaksi = 0
+            totalTransaksi = 0,
+            alamat = alamat
         )
         try {
             firestore.collection("customers").document(cust.id).set(cust.toMap()).await()
@@ -1213,11 +1432,15 @@ class KasirRepository(private val context: Context) {
     }
 
     // SUBSCRIPTION & MIDTRANS SIMULATOR
-    suspend fun upgradeUserSubscription(uid: String, status: String): Boolean {
+    suspend fun upgradeUserSubscription(uid: String, status: String, isYearly: Boolean = false): Boolean {
         return try {
             val user = getUserById(uid) ?: return false
             val endDate = if (status == "premium") {
-                System.currentTimeMillis() + (30L * 24 * 60 * 60 * 1000) // 1 Month
+                if (isYearly) {
+                    System.currentTimeMillis() + (365L * 24 * 60 * 60 * 1000) // 1 Year (365 days)
+                } else {
+                    System.currentTimeMillis() + (30L * 24 * 60 * 60 * 1000) // 1 Month (30 days)
+                }
             } else {
                 null
             }
@@ -1232,11 +1455,12 @@ class KasirRepository(private val context: Context) {
                 subscriptionEndDate = endDate
             )
             // Save to Firestore
-            withTimeoutOrNull(4000L) {
+            withTimeoutOrNull(8500L) {
                 firestore.collection("users").document(uid).set(updated.toMap()).await()
             }
             // Save to local Room
             dao.insertUser(updated)
+            android.util.Log.d("SUBSCRIPTION", "Status updated to premium for uid: ${user.uid}")
             true
         } catch (e: Exception) {
             e.printStackTrace()
@@ -1256,212 +1480,333 @@ class KasirRepository(private val context: Context) {
     // ==========================================
     // REAL FIRESTORE DATA SYNCHRONIZER Engine
     // ==========================================
-    suspend fun syncFromFirestore() {
+    suspend fun syncFromFirestore(forcedUid: String? = null) {
         try {
             withContext(Dispatchers.IO) {
-                val uid = _loggedInUid.value ?: return@withContext
+                val uid = forcedUid ?: _loggedInUid.value ?: return@withContext
+                android.util.Log.d("SYNC", "Starting sync for uid: $uid")
 
-                withTimeoutOrNull(5000L) {
-                    // 1. Sync User info
-                    val userDoc = firestore.collection("users").document(uid).get().await()
+                // 6. TEST KONEKSI FIRESTORE (As requested for diagnosis)
+                try {
+                    val testDoc = firestore.collection("users").document(uid).get().await()
+                    android.util.Log.d("FIRESTORE_TEST", "Document exists: ${testDoc.exists()}")
+                    android.util.Log.d("FIRESTORE_TEST", "Document data: ${testDoc.data}")
+                } catch (te: Exception) {
+                    android.util.Log.e("FIRESTORE_TEST", "Test read failed on users doc: ${te.message}", te)
+                }
+
+                withTimeoutOrNull(35000L) {
                     var targetOwnerId = uid
-                    if (userDoc.exists()) {
-                        val user = UserEntity(
-                            uid = uid,
-                            nama = userDoc.getString("nama") ?: "User",
-                            email = userDoc.getString("email") ?: "",
-                            role = userDoc.getString("role") ?: "owner",
-                            ownerId = userDoc.getString("ownerId"),
-                            assignedBranchId = userDoc.getString("assignedBranchId"),
-                            subscriptionStatus = userDoc.getString("subscriptionStatus") ?: "free",
-                            subscriptionStartDate = userDoc.getLong("subscriptionStartDate"),
-                            subscriptionEndDate = userDoc.getLong("subscriptionEndDate"),
-                            createdAt = userDoc.getLong("createdAt") ?: System.currentTimeMillis(),
-                            lastActiveAt = userDoc.getLong("lastActiveAt")
-                        )
-                        dao.insertUser(user)
-                        
-                        if ((user.role == "kasir" || user.role == "kasir_invited") && !user.ownerId.isNullOrEmpty()) {
-                            targetOwnerId = user.ownerId
+
+                    // 1. Sync User info
+                    try {
+                        android.util.Log.d("SYNC", "Fetching users collection for user: $uid ...")
+                        val userDoc = firestore.collection("users").document(uid).get().await()
+                        if (userDoc.exists()) {
+                            android.util.Log.d("SYNC", "User document found in Firestore: ${userDoc.data}")
+                            val user = UserEntity(
+                                uid = uid,
+                                nama = userDoc.getString("nama") ?: "User",
+                                email = userDoc.getString("email") ?: "",
+                                role = userDoc.getString("role") ?: "owner",
+                                ownerId = userDoc.getString("ownerId"),
+                                assignedBranchId = userDoc.getString("assignedBranchId"),
+                                subscriptionStatus = userDoc.getString("subscriptionStatus") ?: "free",
+                                subscriptionStartDate = userDoc.getLong("subscriptionStartDate"),
+                                subscriptionEndDate = userDoc.getLong("subscriptionEndDate"),
+                                createdAt = userDoc.getLong("createdAt") ?: System.currentTimeMillis(),
+                                lastActiveAt = userDoc.getLong("lastActiveAt")
+                            )
+                            dao.insertUser(user)
+                            android.util.Log.d("SYNC", "Successfully synced user: ${user.nama} with status: ${user.subscriptionStatus}")
+                            
+                            if ((user.role == "kasir" || user.role == "kasir_invited") && !user.ownerId.isNullOrEmpty()) {
+                                targetOwnerId = user.ownerId
+                            }
+                        } else {
+                            android.util.Log.w("SYNC", "User document $uid not found in Firestore. Trying to fetch from cashiers collection...")
+                            val cashierDoc = firestore.collection("cashiers").document(uid).get().await()
+                            if (cashierDoc.exists()) {
+                                android.util.Log.d("SYNC", "Cashier document found in Firestore: ${cashierDoc.data}")
+                                val ownerId = cashierDoc.getString("ownerId") ?: "owner-uid"
+                                val nama = cashierDoc.getString("cashierName") ?: cashierDoc.getString("nama") ?: "Kasir"
+                                val branchId = cashierDoc.getString("branchId") ?: "branch-1-biz-$ownerId"
+                                var subscriptionStatus = "free"
+                                try {
+                                    val ownerDoc = firestore.collection("users").document(ownerId).get().await()
+                                    if (ownerDoc.exists()) {
+                                        subscriptionStatus = ownerDoc.getString("subscriptionStatus") ?: "free"
+                                    }
+                                } catch (ex: Exception) {
+                                    android.util.Log.e("SYNC", "Error fetching owner state for cashier: ${ex.message}")
+                                }
+                                val c = UserEntity(
+                                    uid = uid,
+                                    nama = nama,
+                                    email = cashierDoc.getString("username") ?: "",
+                                    role = "kasir",
+                                    ownerId = ownerId,
+                                    assignedBranchId = branchId,
+                                    subscriptionStatus = subscriptionStatus,
+                                    subscriptionStartDate = null,
+                                    subscriptionEndDate = null,
+                                    createdAt = cashierDoc.getLong("createdAt") ?: System.currentTimeMillis(),
+                                    lastActiveAt = cashierDoc.getLong("lastActiveAt") ?: System.currentTimeMillis()
+                                )
+                                dao.insertUser(c)
+                                targetOwnerId = ownerId
+                            } else {
+                                android.util.Log.w("SYNC", "User/Cashier document $uid not found in Firestore.")
+                                val localUser = dao.getCurrentUserRaw()
+                                if (localUser != null && (localUser.role == "kasir" || localUser.role == "kasir_invited") && !localUser.ownerId.isNullOrEmpty()) {
+                                    targetOwnerId = localUser.ownerId
+                                }
+                            }
                         }
-                    } else {
-                        val localUser = dao.getCurrentUserRaw()
-                        if (localUser != null && (localUser.role == "kasir" || localUser.role == "kasir_invited") && !localUser.ownerId.isNullOrEmpty()) {
-                            targetOwnerId = localUser.ownerId
-                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing user info: ${e.message}", e)
                     }
 
                     // 2. Sync Business info
-                    val bizSnap = firestore.collection("businesses").whereEqualTo("ownerId", targetOwnerId).get().await()
                     var currentBusinessId: String? = null
-                    for (doc in bizSnap.documents) {
-                        val biz = BusinessEntity(
-                            id = doc.id,
-                            ownerId = targetOwnerId,
-                            namaBisnis = doc.getString("namaBisnis") ?: "",
-                            logoUrl = doc.getString("logoUrl"),
-                            createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
-                        )
-                        dao.insertBusiness(biz)
-                        currentBusinessId = doc.id
+                    try {
+                        android.util.Log.d("SYNC", "Fetching businesses collection for ownerId: $targetOwnerId ...")
+                        val bizSnap = firestore.collection("businesses").whereEqualTo("ownerId", targetOwnerId).get().await()
+                        android.util.Log.d("SYNC", "Businesses found: ${bizSnap.size()}")
+                        for (doc in bizSnap.documents) {
+                            val biz = BusinessEntity(
+                                id = doc.id,
+                                ownerId = targetOwnerId,
+                                namaBisnis = doc.getString("namaBisnis") ?: "",
+                                logoUrl = doc.getString("logoUrl"),
+                                alamat = doc.getString("alamat"),
+                                noTelpon = doc.getString("noTelpon"),
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                            )
+                            dao.insertBusiness(biz)
+                            currentBusinessId = doc.id
+                            android.util.Log.d("SYNC", "Synced Business: ${biz.namaBisnis} (${biz.id})")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing business info: ${e.message}", e)
                     }
 
                     // 2b. Sync Cashiers from Firestore cashiers collection
-                    val cashiersSnap = firestore.collection("cashiers").whereEqualTo("ownerId", targetOwnerId).get().await()
-                    for (doc in cashiersSnap.documents) {
-                        val uid = doc.id
-                        val username = doc.getString("username") ?: doc.id.substringBefore("_")
-                        val nama = doc.getString("cashierName") ?: doc.getString("nama") ?: "Kasir"
-                        val branchId = doc.getString("branchId") ?: ""
-                        val c = UserEntity(
-                            uid = uid,
-                            nama = nama,
-                            email = username, // keep pure username in email field
-                            role = "kasir",
-                            ownerId = targetOwnerId,
-                            assignedBranchId = branchId,
-                            subscriptionStatus = "free",
-                            subscriptionStartDate = null,
-                            subscriptionEndDate = null,
-                            createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
-                            lastActiveAt = doc.getLong("lastActiveAt")
-                        )
-                        dao.insertUser(c)
+                    try {
+                        android.util.Log.d("SYNC", "Fetching cashiers collection for ownerId: $targetOwnerId ...")
+                        val cashiersSnap = firestore.collection("cashiers").whereEqualTo("ownerId", targetOwnerId).get().await()
+                        android.util.Log.d("SYNC", "Cashiers found: ${cashiersSnap.size()}")
+                        for (doc in cashiersSnap.documents) {
+                            val cUid = doc.id
+                            val username = doc.getString("username") ?: doc.id.substringBefore("_")
+                            val nama = doc.getString("cashierName") ?: doc.getString("nama") ?: "Kasir"
+                            val branchId = doc.getString("branchId") ?: ""
+                            val c = UserEntity(
+                                uid = cUid,
+                                nama = nama,
+                                email = username, // keep pure username in email field
+                                role = "kasir",
+                                ownerId = targetOwnerId,
+                                assignedBranchId = branchId,
+                                subscriptionStatus = "free",
+                                subscriptionStartDate = null,
+                                subscriptionEndDate = null,
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
+                                lastActiveAt = doc.getLong("lastActiveAt")
+                            )
+                            dao.insertUser(c)
+                            android.util.Log.d("SYNC", "Synced Cashier: ${c.nama} (uid: ${c.uid})")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing cashiers info: ${e.message}", e)
                     }
 
                     // If we found a business, sync all sub collections
                     val businessId = currentBusinessId ?: "biz-$targetOwnerId"
+                    android.util.Log.d("SYNC", "Using business ID for scoping: $businessId")
 
-            // 3. Sync Branches
-            val branchSnap = firestore.collection("branches").whereEqualTo("businessId", businessId).get().await()
-            for (doc in branchSnap.documents) {
-                val b = BranchEntity(
-                    id = doc.id,
-                    businessId = businessId,
-                    namaCabang = doc.getString("namaCabang") ?: "",
-                    alamat = doc.getString("alamat") ?: "",
-                    kasirIdsCsv = doc.getString("kasirIdsCsv") ?: "",
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
-                )
-                dao.insertBranch(b)
-            }
+                    // 3. Sync Branches
+                    try {
+                        android.util.Log.d("SYNC", "Fetching branches collection for businessId: $businessId ...")
+                        val branchSnap = firestore.collection("branches").whereEqualTo("businessId", businessId).get().await()
+                        android.util.Log.d("SYNC", "Branches found: ${branchSnap.size()}")
+                        for (doc in branchSnap.documents) {
+                            val b = BranchEntity(
+                                id = doc.id,
+                                businessId = businessId,
+                                namaCabang = doc.getString("namaCabang") ?: "",
+                                alamat = doc.getString("alamat") ?: "",
+                                kasirIdsCsv = doc.getString("kasirIdsCsv") ?: "",
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                            )
+                            dao.insertBranch(b)
+                            android.util.Log.d("SYNC", "Synced Branch: ${b.namaCabang} (${b.id})")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing branches: ${e.message}", e)
+                    }
 
-            // 4. Sync Products
-            val prodSnap = firestore.collection("products").whereEqualTo("businessId", businessId).get().await()
-            for (doc in prodSnap.documents) {
-                val p = ProductEntity(
-                    id = doc.id,
-                    businessId = businessId,
-                    branchId = doc.getString("branchId") ?: "branch-1-$businessId",
-                    nama = doc.getString("nama") ?: "",
-                    kategori = doc.getString("kategori") ?: "",
-                    hargaJual = doc.getSafeDouble("hargaJual"),
-                    hargaModal = doc.getSafeDouble("hargaModal"),
-                    stok = doc.getLong("stok")?.toInt() ?: 0,
-                    stokMinimum = doc.getLong("stokMinimum")?.toInt() ?: 0,
-                    barcode = doc.getString("barcode"),
-                    fotoUrl = doc.getString("fotoUrl"),
-                    varianRaw = doc.getString("varianRaw") ?: "",
-                    isActive = doc.getBoolean("isActive") ?: true,
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
-                )
-                dao.insertProduct(p)
-            }
+                    // 4. Sync Products
+                    try {
+                        android.util.Log.d("SYNC", "Fetching products collection for businessId: $businessId ...")
+                        val prodSnap = firestore.collection("products").whereEqualTo("businessId", businessId).get().await()
+                        android.util.Log.d("SYNC", "Products found: ${prodSnap.size()}")
+                        for (doc in prodSnap.documents) {
+                            val p = ProductEntity(
+                                id = doc.id,
+                                businessId = businessId,
+                                branchId = doc.getString("branchId") ?: "branch-1-$businessId",
+                                nama = doc.getString("nama") ?: "",
+                                kategori = doc.getString("kategori") ?: "",
+                                hargaJual = doc.getSafeDouble("hargaJual"),
+                                hargaModal = doc.getSafeDouble("hargaModal"),
+                                stok = doc.getLong("stok")?.toInt() ?: 0,
+                                stokMinimum = doc.getLong("stokMinimum")?.toInt() ?: 0,
+                                barcode = doc.getString("barcode"),
+                                fotoUrl = doc.getString("photoPath") ?: doc.getString("fotoUrl"),
+                                varianRaw = doc.getString("varianRaw") ?: "",
+                                satuan = doc.getString("satuan") ?: "Pcs",
+                                isActive = doc.getBoolean("isActive") ?: true,
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                            )
+                            dao.insertProduct(p)
+                            android.util.Log.d("SYNC", "Synced Product: ${p.nama} (Stock: ${p.stok})")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing products: ${e.message}", e)
+                    }
 
-            // 5. Sync Customers
-            val custSnap = firestore.collection("customers").whereEqualTo("businessId", businessId).get().await()
-            for (doc in custSnap.documents) {
-                val c = CustomerEntity(
-                    id = doc.id,
-                    businessId = businessId,
-                    nama = doc.getString("nama") ?: "",
-                    nomorHp = doc.getString("nomorHp") ?: "",
-                    totalPoin = doc.getLong("totalPoin")?.toInt() ?: 0,
-                    totalTransaksi = doc.getLong("totalTransaksi")?.toInt() ?: 0,
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
-                )
-                dao.insertCustomer(c)
-            }
+                    // 5. Sync Customers
+                    try {
+                        android.util.Log.d("SYNC", "Fetching customers collection for businessId: $businessId ...")
+                        val custSnap = firestore.collection("customers").whereEqualTo("businessId", businessId).get().await()
+                        android.util.Log.d("SYNC", "Customers found: ${custSnap.size()}")
+                        for (doc in custSnap.documents) {
+                            val c = CustomerEntity(
+                                id = doc.id,
+                                businessId = businessId,
+                                nama = doc.getString("nama") ?: "",
+                                nomorHp = doc.getString("nomorHp") ?: "",
+                                totalPoin = doc.getLong("totalPoin")?.toInt() ?: 0,
+                                totalTransaksi = doc.getLong("totalTransaksi")?.toInt() ?: 0,
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                            )
+                            dao.insertCustomer(c)
+                            android.util.Log.d("SYNC", "Synced Customer: ${c.nama}")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing customers: ${e.message}", e)
+                    }
 
-            // 6. Sync Promos
-            val promoSnap = firestore.collection("promos").whereEqualTo("businessId", businessId).get().await()
-            for (doc in promoSnap.documents) {
-                val pr = PromoEntity(
-                    id = doc.id,
-                    businessId = businessId,
-                    nama = doc.getString("nama") ?: "",
-                    tipe = doc.getString("tipe") ?: "",
-                    nilai = doc.getSafeDouble("nilai"),
-                    minTransaksi = doc.getSafeDouble("minTransaksi"),
-                    kode = doc.getString("kode") ?: "",
-                    isActive = doc.getBoolean("isActive") ?: true,
-                    berlakuSampai = doc.getLong("berlakuSampai") ?: 0L,
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
-                )
-                dao.insertPromo(pr)
-            }
+                    // 6. Sync Promos
+                    try {
+                        android.util.Log.d("SYNC", "Fetching promos collection for businessId: $businessId ...")
+                        val promoSnap = firestore.collection("promos").whereEqualTo("businessId", businessId).get().await()
+                        android.util.Log.d("SYNC", "Promos found: ${promoSnap.size()}")
+                        for (doc in promoSnap.documents) {
+                            val pr = PromoEntity(
+                                id = doc.id,
+                                businessId = businessId,
+                                nama = doc.getString("nama") ?: "",
+                                tipe = doc.getString("tipe") ?: "",
+                                nilai = doc.getSafeDouble("nilai"),
+                                minTransaksi = doc.getSafeDouble("minTransaksi"),
+                                kode = doc.getString("kode") ?: "",
+                                isActive = doc.getBoolean("isActive") ?: true,
+                                berlakuSampai = doc.getLong("berlakuSampai") ?: 0L,
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                            )
+                            dao.insertPromo(pr)
+                            android.util.Log.d("SYNC", "Synced Promo: ${pr.nama}")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing promos: ${e.message}", e)
+                    }
 
-            // 7. Sync Debts
-            val debtSnap = firestore.collection("debts").whereEqualTo("businessId", businessId).get().await()
-            for (doc in debtSnap.documents) {
-                val d = DebtEntity(
-                    id = doc.id,
-                    businessId = businessId,
-                    branchId = doc.getString("branchId") ?: "branch-1-$businessId",
-                    pelangganId = doc.getString("pelangganId") ?: "",
-                    pelangganNama = doc.getString("pelangganNama") ?: "",
-                    jumlah = doc.getSafeDouble("jumlah"),
-                    transaksiId = doc.getString("transaksiId") ?: "",
-                    status = doc.getString("status") ?: "belum",
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
-                )
-                dao.insertDebt(d)
-            }
+                    // 7. Sync Debts
+                    try {
+                        android.util.Log.d("SYNC", "Fetching debts collection for businessId: $businessId ...")
+                        val debtSnap = firestore.collection("debts").whereEqualTo("businessId", businessId).get().await()
+                        android.util.Log.d("SYNC", "Debts found: ${debtSnap.size()}")
+                        for (doc in debtSnap.documents) {
+                            val d = DebtEntity(
+                                id = doc.id,
+                                businessId = businessId,
+                                branchId = doc.getString("branchId") ?: "branch-1-$businessId",
+                                pelangganId = doc.getString("pelangganId") ?: "",
+                                pelangganNama = doc.getString("pelangganNama") ?: "",
+                                jumlah = doc.getSafeDouble("jumlah"),
+                                transaksiId = doc.getString("transaksiId") ?: "",
+                                status = doc.getString("status") ?: "belum",
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                            )
+                            dao.insertDebt(d)
+                            android.util.Log.d("SYNC", "Synced Debt for: ${d.pelangganNama} (Amount: ${d.jumlah})")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing debts: ${e.message}", e)
+                    }
 
-            // 8. Sync Transactions
-            val txSnap = firestore.collection("transactions").whereEqualTo("businessId", businessId).get().await()
-            for (doc in txSnap.documents) {
-                val tx = TransactionEntity(
-                    id = doc.id,
-                    businessId = businessId,
-                    branchId = doc.getString("branchId") ?: "branch-1-$businessId",
-                    kasirId = doc.getString("kasirId") ?: "kasir-1",
-                    kasirNama = doc.getString("kasirNama") ?: "Kasir Pro",
-                    itemsRaw = doc.getString("itemsRaw") ?: "",
-                    subtotal = doc.getSafeDouble("subtotal"),
-                    diskonTotal = doc.getSafeDouble("diskonTotal"),
-                    kodePromo = doc.getString("kodePromo"),
-                    total = doc.getSafeDouble("total"),
-                    metodeBayar = doc.getString("metodeBayar") ?: "Tunai",
-                    bayarNominal = doc.getSafeDouble("bayarNominal"),
-                    kembalian = doc.getSafeDouble("kembalian"),
-                    status = doc.getString("status") ?: "lunas",
-                    pelangganId = doc.getString("pelangganId"),
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
-                    isOfflinePending = false
-                )
-                dao.insertTransaction(tx)
-            }
+                    // 8. Sync Transactions
+                    try {
+                        android.util.Log.d("SYNC", "Fetching transactions collection for businessId: $businessId ...")
+                        val txSnap = firestore.collection("transactions").whereEqualTo("businessId", businessId).get().await()
+                        android.util.Log.d("SYNC", "Transactions found: ${txSnap.size()}")
+                        for (doc in txSnap.documents) {
+                            val tx = TransactionEntity(
+                                id = doc.id,
+                                businessId = businessId,
+                                branchId = doc.getString("branchId") ?: "branch-1-$businessId",
+                                kasirId = doc.getString("kasirId") ?: "kasir-1",
+                                kasirNama = doc.getString("kasirNama") ?: "Kasir Pro",
+                                itemsRaw = doc.getString("itemsRaw") ?: "",
+                                subtotal = doc.getSafeDouble("subtotal"),
+                                diskonTotal = doc.getSafeDouble("diskonTotal"),
+                                kodePromo = doc.getString("kodePromo"),
+                                total = doc.getSafeDouble("total"),
+                                metodeBayar = doc.getString("metodeBayar") ?: "Tunai",
+                                bayarNominal = doc.getSafeDouble("bayarNominal"),
+                                kembalian = doc.getSafeDouble("kembalian"),
+                                status = doc.getString("status") ?: "lunas",
+                                pelangganId = doc.getString("pelangganId"),
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis(),
+                                isOfflinePending = false
+                            )
+                            dao.insertTransaction(tx)
+                            android.util.Log.d("SYNC", "Synced Transaction: ${tx.id} (Total: ${tx.total})")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing transactions: ${e.message}", e)
+                    }
 
-            // 9. Sync Stock History
-            val shSnap = firestore.collection("stock_history").whereEqualTo("businessId", businessId).get().await()
-            for (doc in shSnap.documents) {
-                val sh = StockHistoryEntity(
-                    id = doc.id,
-                    productId = doc.getString("productId") ?: "",
-                    businessId = businessId,
-                    tipe = doc.getString("tipe") ?: "masuk",
-                    jumlah = doc.getLong("jumlah")?.toInt() ?: 0,
-                    stokSebelum = doc.getLong("stokSebelum")?.toInt() ?: 0,
-                    stokSesudah = doc.getLong("stokSesudah")?.toInt() ?: 0,
-                    keterangan = doc.getString("keterangan"),
-                    createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
-                )
-                dao.insertStockHistory(sh)
-            }
-            } // end of withTimeoutOrNull
+                    // 9. Sync Stock History
+                    try {
+                        android.util.Log.d("SYNC", "Fetching stock_history collection for businessId: $businessId ...")
+                        val shSnap = firestore.collection("stock_history").whereEqualTo("businessId", businessId).get().await()
+                        android.util.Log.d("SYNC", "Stock histories found: ${shSnap.size()}")
+                        for (doc in shSnap.documents) {
+                            val sh = StockHistoryEntity(
+                                id = doc.id,
+                                productId = doc.getString("productId") ?: "",
+                                businessId = businessId,
+                                tipe = doc.getString("tipe") ?: "masuk",
+                                jumlah = doc.getLong("jumlah")?.toInt() ?: 0,
+                                stokSebelum = doc.getLong("stokSebelum")?.toInt() ?: 0,
+                                stokSesudah = doc.getLong("stokSesudah")?.toInt() ?: 0,
+                                keterangan = doc.getString("keterangan"),
+                                createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+                            )
+                            dao.insertStockHistory(sh)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("SYNC", "Error syncing stock histories: ${e.message}", e)
+                    }
+
+                    android.util.Log.d("SYNC", "Sync completed successfully")
+                } // end of withTimeoutOrNull
             } // end of withContext
         } catch (e: Exception) {
+            android.util.Log.e("SYNC", "Fatal error during syncFromFirestore: ${e.message}", e)
             e.printStackTrace()
         }
     }
@@ -1554,6 +1899,16 @@ class KasirRepository(private val context: Context) {
         } catch (e: Exception) {
             e.printStackTrace()
             emptyList()
+        }
+    }
+
+    suspend fun correctTransaction(correctedTx: TransactionEntity) {
+        dao.insertTransaction(correctedTx)
+        try {
+            val firestoreMap = correctedTx.toMap().toMutableMap()
+            firestore.collection("transactions").document(correctedTx.id).set(firestoreMap).await()
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 }

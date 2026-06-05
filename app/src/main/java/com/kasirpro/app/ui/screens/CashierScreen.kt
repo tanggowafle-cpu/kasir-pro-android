@@ -37,19 +37,52 @@ import com.kasirpro.app.data.repository.TransactionItem
 import com.kasirpro.app.ui.viewmodel.KasirViewModel
 import com.kasirpro.app.ui.theme.*
 import com.kasirpro.app.util.BarcodeScannerHelper
+import com.kasirpro.app.util.ProductImage
+import com.kasirpro.app.util.ShopLogoImage
 import java.text.NumberFormat
 import java.util.Locale
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+private fun playBarcodeBeep() {
+    try {
+        val toneGen = android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 100)
+        toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 150)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
+private fun triggerVibe(context: android.content.Context) {
+    try {
+        val vibrator = context.getSystemService(android.content.Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+        if (vibrator != null) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                vibrator.vibrate(android.os.VibrationEffect.createOneShot(50, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                vibrator.vibrate(50)
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CashierScreen(viewModel: KasirViewModel) {
+    val business by viewModel.currentBusiness.collectAsState()
     val productsList by viewModel.products.collectAsState()
     val cart by viewModel.cartItems.collectAsState()
     val currentCustomer by viewModel.selectedCustomer.collectAsState()
@@ -74,6 +107,18 @@ fun CashierScreen(viewModel: KasirViewModel) {
     var showDiscountDialogItem by remember { mutableStateOf<TransactionItem?>(null) }
     var showCustomerPicker by remember { mutableStateOf(false) }
     var showPromoPicker by remember { mutableStateOf(false) }
+    
+    var showAddCustomerDialog by remember { mutableStateOf(false) }
+    var newCustNama by remember { mutableStateOf("") }
+    var newCustHp by remember { mutableStateOf("") }
+    var newCustAlamat by remember { mutableStateOf("") }
+    
+    // Auto collapse checkout dialog if cart is fully emptied
+    LaunchedEffect(cart) {
+        if (cart.isEmpty() && showCheckoutDialog) {
+            showCheckoutDialog = false
+        }
+    }
     
     val context = LocalContext.current
     val categories = listOf("Semua") + productsList.map { it.kategori }.distinct()
@@ -148,7 +193,16 @@ fun CashierScreen(viewModel: KasirViewModel) {
         )
     }
 
+    val scanInteractionSource = remember { MutableInteractionSource() }
+    val isScanPressed by scanInteractionSource.collectIsPressedAsState()
+    val scanScale by animateFloatAsState(
+        targetValue = if (isScanPressed) 0.9f else 1.0f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMedium),
+        label = "scan_barcode_scale"
+    )
+
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = { Text("Kasir Pos Penjualan", fontWeight = FontWeight.Bold, fontSize = 20.sp) },
@@ -158,38 +212,53 @@ fun CashierScreen(viewModel: KasirViewModel) {
                             Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "Back")
                         }
                     }
-                },
-                actions = {
-                    // Start camera scanning with real-time product lookup
-                    IconButton(
-                        onClick = {
-                            BarcodeScannerHelper.startScan(context) { scannedValue ->
-                                val matched = productsList.find { it.barcode == scannedValue }
-                                if (matched != null) {
-                                    if ((matched.varianRaw ?: "").isNotBlank()) {
-                                        viewModel.showVarianDialog.value = matched
-                                    } else {
-                                        viewModel.addToCart(matched)
-                                        Toast.makeText(context, "${matched.nama} sukses ditambahkan ke keranjang!", Toast.LENGTH_SHORT).show()
-                                    }
-                                } else {
-                                    Toast.makeText(context, "Barcode '$scannedValue' tidak ditemukan!", Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        },
-                        modifier = Modifier.testTag("scan_barcode_icon")
-                    ) {
-                        Icon(imageVector = Icons.Default.QrCodeScanner, contentDescription = "Scan Barcode", tint = OrangePrimary)
-                    }
                 }
             )
+        },
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = {
+                    BarcodeScannerHelper.startScan(context) { scannedValue ->
+                        val matched = productsList.find { it.barcode == scannedValue }
+                        if (matched != null) {
+                            playBarcodeBeep()
+                            triggerVibe(context)
+                            if ((matched.varianRaw ?: "").isNotBlank()) {
+                                viewModel.showVarianDialog.value = matched
+                            } else {
+                                viewModel.addToCart(matched)
+                                val currentCount = cart.filter { it.id == matched.id }.sumOf { it.jumlah }
+                                Toast.makeText(context, "${matched.nama} ditambahkan ke keranjang (Banyaknya: ${currentCount + 1})", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            Toast.makeText(context, "Barcode '$scannedValue' tidak ditemukan!", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                shape = CircleShape,
+                containerColor = OrangePrimary,
+                contentColor = Color.White,
+                elevation = FloatingActionButtonDefaults.elevation(
+                    defaultElevation = 8.dp,
+                    pressedElevation = 4.dp
+                ),
+                interactionSource = scanInteractionSource,
+                modifier = Modifier
+                    .graphicsLayer(scaleX = scanScale, scaleY = scanScale)
+                    .testTag("scan_barcode_icon")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.QrCodeScanner,
+                    contentDescription = "Scan Barcode",
+                    modifier = Modifier.size(24.dp)
+                )
+            }
         },
         bottomBar = {
             if (cart.isNotEmpty()) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.navigationBars)
                         .testTag("cart_preview_bar"),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
@@ -295,19 +364,22 @@ fun CashierScreen(viewModel: KasirViewModel) {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(16.dp),
+                    contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 88.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(filteredProducts) { item ->
+                     items(filteredProducts) { item ->
                         Card(
                             onClick = {
+                                triggerVibe(context)
                                 // Check if variant exist
                                 val parts = (item.varianRaw ?: "").split(";").filter { it.isNotBlank() }
                                 if (parts.isNotEmpty()) {
                                     viewModel.showVarianDialog.value = item
                                 } else {
                                     viewModel.addToCart(item)
+                                    val currentCount = cart.filter { it.id == item.id }.sumOf { it.jumlah }
+                                    Toast.makeText(context, "${item.nama} ditambahkan ke keranjang (Banyaknya: ${currentCount + 1})", Toast.LENGTH_SHORT).show()
                                 }
                             },
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -323,16 +395,11 @@ fun CashierScreen(viewModel: KasirViewModel) {
                                             .background(OrangeLight),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        if (item.fotoUrl != null) {
-                                            AsyncImage(
-                                                model = item.fotoUrl,
-                                                contentDescription = item.nama,
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentScale = ContentScale.Crop
-                                            )
-                                        } else {
-                                            Icon(imageVector = Icons.Default.Fastfood, contentDescription = null, tint = OrangePrimary, modifier = Modifier.size(36.dp))
-                                        }
+                                        ProductImage(
+                                            fotoUrl = item.fotoUrl,
+                                            contentDescription = item.nama,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
                                     }
 
                                     Spacer(modifier = Modifier.height(8.dp))
@@ -354,7 +421,7 @@ fun CashierScreen(viewModel: KasirViewModel) {
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text("Stok: ${item.stok}", fontSize = 11.sp, color = if (item.stok <= item.stokMinimum) Color.Red else Color.Gray)
+                                        Text("Stok: ${item.stok} ${item.satuan}", fontSize = 11.sp, color = if (item.stok <= item.stokMinimum) Color.Red else Color.Gray)
                                         if ((item.varianRaw ?: "").isNotBlank()) {
                                             Box(
                                                 modifier = Modifier
@@ -365,6 +432,24 @@ fun CashierScreen(viewModel: KasirViewModel) {
                                                 Text("VARIAN", fontSize = 9.sp, color = OrangeDark, fontWeight = FontWeight.Bold)
                                             }
                                         }
+                                    }
+                                }
+
+                                val currentJumlahInCart = cart.filter { it.id == item.id }.sumOf { it.jumlah }
+                                if (currentJumlahInCart > 0) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(6.dp)
+                                            .background(OrangePrimary, shape = RoundedCornerShape(12.dp))
+                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = "$currentJumlahInCart",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
                                     }
                                 }
                             }
@@ -390,6 +475,7 @@ fun CashierScreen(viewModel: KasirViewModel) {
                     options.forEach { opt ->
                         Card(
                             onClick = {
+                                triggerVibe(context)
                                 viewModel.addToCart(prod, opt)
                                 viewModel.showVarianDialog.value = null
                             },
@@ -444,6 +530,8 @@ fun CashierScreen(viewModel: KasirViewModel) {
                     onClick = {
                         val matched = productsList.find { it.barcode == simulatedScannedBarcode }
                         if (matched != null) {
+                            playBarcodeBeep()
+                            triggerVibe(context)
                             if ((matched.varianRaw ?: "").isNotBlank()) {
                                 viewModel.showVarianDialog.value = matched
                             } else {
@@ -481,15 +569,104 @@ fun CashierScreen(viewModel: KasirViewModel) {
                         Text("Ringkasan Pesanan", fontWeight = FontWeight.Bold, color = OrangePrimary)
                     }
                     items(cart) { ci ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column {
-                                Text(ci.nama + (ci.varianSelected?.let { " ($it)" } ?: ""), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                                Text("Qty: ${ci.jumlah} x ${idrFormatter.format(ci.harga)}", fontSize = 12.sp, color = Color.Gray)
+                            Row(
+                                modifier = Modifier.padding(8.dp).fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = ci.nama + (ci.varianSelected?.let { " ($it)" } ?: ""),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = idrFormatter.format(ci.harga),
+                                        fontSize = 11.sp,
+                                        color = OrangePrimary
+                                    )
+                                    
+                                    // Control Buttons Row
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    ) {
+                                        // Reduce quantity button
+                                        IconButton(
+                                            onClick = { 
+                                                triggerVibe(context)
+                                                viewModel.updateCartQuantity(ci, ci.jumlah - 1) 
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Remove,
+                                                contentDescription = "Kurang",
+                                                tint = Color.Gray,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                        
+                                        // Current Quantity
+                                        Text(
+                                            text = "${ci.jumlah}",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp,
+                                            modifier = Modifier.padding(horizontal = 4.dp)
+                                        )
+                                        
+                                        // Increase quantity button
+                                        IconButton(
+                                            onClick = { 
+                                                triggerVibe(context)
+                                                viewModel.updateCartQuantity(ci, ci.jumlah + 1) 
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Add,
+                                                contentDescription = "Tambah",
+                                                tint = OrangePrimary,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                        
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        
+                                        // Delete/Cancel Item completely
+                                        IconButton(
+                                            onClick = { 
+                                                triggerVibe(context)
+                                                viewModel.updateCartQuantity(ci, 0) 
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Delete,
+                                                contentDescription = "Batal",
+                                                tint = Color.Red,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                
+                                Text(
+                                    text = idrFormatter.format(ci.subtotal()),
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 13.sp,
+                                    color = Color.Black,
+                                    modifier = Modifier.padding(start = 8.dp)
+                                )
                             }
-                            Text(idrFormatter.format(ci.subtotal()), fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
 
@@ -641,36 +818,227 @@ fun CashierScreen(viewModel: KasirViewModel) {
 
     // Secondarypicker: Customer choose Loyalty DB Dialog
     if (showCustomerPicker) {
-        AlertDialog(
-            onDismissRequest = { showCustomerPicker = false },
-            title = { Text("Pilih Pelanggan Loyalty Hub") },
-            text = {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().heightIn(max = 250.dp)) {
-                    if (customersList.isEmpty()) {
-                        item { Text("Database pelanggan kosong. Nyalakan demo atau buat baru di menu Premium Pelanggan!", fontSize = 11.sp, color = Color.Gray) }
-                    }
-                    items(customersList) { c ->
-                        Card(
+        val isPremium = user?.subscriptionStatus == "premium"
+        if (customersList.isEmpty()) {
+            if (isPremium) {
+                AlertDialog(
+                    onDismissRequest = { showCustomerPicker = false },
+                    icon = { Icon(imageVector = Icons.Default.People, contentDescription = null, tint = OrangePrimary, modifier = Modifier.size(48.dp)) },
+                    title = { Text("Belum Ada Data Pelanggan", fontWeight = FontWeight.Bold, textAlign = TextAlign.Center) },
+                    text = {
+                        Text(
+                            "Anda belum menambahkan data pelanggan. Tambahkan pelanggan terlebih dahulu melalui menu Pelanggan.",
+                            textAlign = TextAlign.Center,
+                            fontSize = 14.sp
+                        )
+                    },
+                    confirmButton = {
+                        Button(
                             onClick = {
-                                viewModel.selectedCustomer.value = c
                                 showCustomerPicker = false
+                                showAddCustomerDialog = true
                             },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                            colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary)
                         ) {
-                            Row(modifier = Modifier.padding(12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Column {
-                                    Text(c.nama, fontWeight = FontWeight.SemiBold)
-                                    Text("Telp: ${c.nomorHp}", fontSize = 11.sp, color = Color.Gray)
+                            Text("Tambah Pelanggan")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showCustomerPicker = false }) {
+                            Text("Tutup")
+                        }
+                    }
+                )
+            } else {
+                AlertDialog(
+                    onDismissRequest = { showCustomerPicker = false },
+                    icon = { Icon(imageVector = Icons.Default.People, contentDescription = null, tint = OrangePrimary, modifier = Modifier.size(48.dp)) },
+                    title = { Text("Belum Ada Data Pelanggan", fontWeight = FontWeight.Bold, textAlign = TextAlign.Center) },
+                    text = {
+                        Text(
+                            "Fitur manajemen pelanggan tersedia di paket Premium. Upgrade sekarang untuk mengelola loyalitas pelanggan dan meningkatkan penjualan.",
+                            textAlign = TextAlign.Center,
+                            fontSize = 14.sp
+                        )
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                showCustomerPicker = false
+                                viewModel.activeScreen.value = "premium_pricing"
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary)
+                        ) {
+                            Text("Upgrade Premium")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showCustomerPicker = false }) {
+                            Text("Tutup")
+                        }
+                    }
+                )
+            }
+        } else {
+            AlertDialog(
+                onDismissRequest = { showCustomerPicker = false },
+                title = { 
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Pilih Pelanggan Loyalty Hub", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (isPremium) {
+                            OutlinedButton(
+                                onClick = {
+                                    showCustomerPicker = false
+                                    showAddCustomerDialog = true
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = OrangePrimary),
+                                border = BorderStroke(1.dp, OrangePrimary),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(imageVector = Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("+ Tambah Pelanggan Baru", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().heightIn(max = 250.dp)) {
+                            items(customersList) { c ->
+                                Card(
+                                    onClick = {
+                                        viewModel.selectedCustomer.value = c
+                                        showCustomerPicker = false
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                ) {
+                                    Row(modifier = Modifier.padding(12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                        Column {
+                                            Text(c.nama, fontWeight = FontWeight.SemiBold)
+                                            Text("Telp: ${c.nomorHp}", fontSize = 11.sp, color = Color.Gray)
+                                            if (!c.alamat.isNullOrBlank()) {
+                                                Text("Alamat: ${c.alamat}", fontSize = 10.sp, color = Color.Gray)
+                                            }
+                                        }
+                                        Text("${c.totalPoin} PTS", fontWeight = FontWeight.Bold, color = OrangePrimary)
+                                    }
                                 }
-                                Text("${c.totalPoin} PTS", fontWeight = FontWeight.Bold, color = OrangePrimary)
                             }
                         }
                     }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showCustomerPicker = false }) { Text("Batal") }
+                }
+            )
+        }
+    }
+
+    // CUSTOM DIALOG: TAMBAH PELANGGAN BARU KASIR
+    if (showAddCustomerDialog) {
+        var nameError by remember { mutableStateOf(false) }
+        var hpError by remember { mutableStateOf(false) }
+        
+        AlertDialog(
+            onDismissRequest = { showAddCustomerDialog = false },
+            icon = { Icon(imageVector = Icons.Default.PersonAdd, contentDescription = null, tint = OrangePrimary, modifier = Modifier.size(40.dp)) },
+            title = { Text("Tambah Pelanggan Baru", fontWeight = FontWeight.Bold, fontSize = 18.sp) },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "Masukkan data pelanggan untuk dihubungkan ke program loyalty & bonus poin warung.",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                    
+                    OutlinedTextField(
+                        value = newCustNama,
+                        onValueChange = { 
+                            newCustNama = it
+                            nameError = it.isBlank()
+                        },
+                        label = { Text("Nama Lengkap*") },
+                        placeholder = { Text("Contoh: Ahmad Budiman") },
+                        isError = nameError,
+                        supportingText = { if (nameError) Text("Nama wajib diisi", color = MaterialTheme.colorScheme.error) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    
+                    OutlinedTextField(
+                        value = newCustHp,
+                        onValueChange = { 
+                            newCustHp = it
+                            hpError = it.isBlank()
+                        },
+                        label = { Text("No. WhatsApp/HP*") },
+                        placeholder = { Text("Contoh: 08123456789") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        isError = hpError,
+                        supportingText = { if (hpError) Text("Nomor WA wajib diisi", color = MaterialTheme.colorScheme.error) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    
+                    OutlinedTextField(
+                        value = newCustAlamat,
+                        onValueChange = { newCustAlamat = it },
+                        label = { Text("Alamat (Opsional)") },
+                        placeholder = { Text("Contoh: Jl. Merdeka No. 10") },
+                        singleLine = false,
+                        maxLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showCustomerPicker = false }) { Text("Batal") }
+                Button(
+                    onClick = {
+                        val n = newCustNama.trim()
+                        val h = newCustHp.trim()
+                        val a = newCustAlamat.trim().takeIf { it.isNotBlank() }
+                        
+                        if (n.isBlank() || h.isBlank()) {
+                            nameError = n.isBlank()
+                            hpError = h.isBlank()
+                            return@Button
+                        }
+                        
+                        viewModel.addCustomer(n, h, a)
+                        Toast.makeText(context, "Pelanggan $n berhasil disimpan!", Toast.LENGTH_SHORT).show()
+                        
+                        // Reset forms
+                        newCustNama = ""
+                        newCustHp = ""
+                        newCustAlamat = ""
+                        showAddCustomerDialog = false
+                        // Automatically re-open customer picker so they can select the newly added customer!
+                        showCustomerPicker = true
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary)
+                ) {
+                    Text("Simpan")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { 
+                        showAddCustomerDialog = false 
+                    }
+                ) {
+                    Text("Batal")
+                }
             }
         )
     }
@@ -736,8 +1104,26 @@ fun CashierScreen(viewModel: KasirViewModel) {
                         .padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text("KASIR PRO PRINT", fontWeight = FontWeight.Bold, color = Color.Black, fontSize = 14.sp)
-                    Text("Cabang Jakarta Selatan", fontSize = 11.sp, color = Color.DarkGray)
+                    // Dynamic Shop Logo
+                    if (!business?.logoUrl.isNullOrBlank()) {
+                        ShopLogoImage(
+                            logoUrl = business?.logoUrl,
+                            contentDescription = business?.namaBisnis,
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .padding(bottom = 6.dp)
+                        )
+                    }
+                    Text(business?.namaBisnis ?: "KASIR PRO SHOP", fontWeight = FontWeight.Bold, color = Color.Black, fontSize = 15.sp, textAlign = TextAlign.Center)
+                    if (!business?.alamat.isNullOrBlank()) {
+                        Text(business!!.alamat!!, fontSize = 11.sp, color = Color.DarkGray, textAlign = TextAlign.Center)
+                    } else {
+                        Text("Cabang Utama", fontSize = 11.sp, color = Color.DarkGray, textAlign = TextAlign.Center)
+                    }
+                    if (!business?.noTelpon.isNullOrBlank()) {
+                        Text("Tel: ${business!!.noTelpon!!}", fontSize = 11.sp, color = Color.DarkGray, textAlign = TextAlign.Center)
+                    }
                     Text("---------------------------------", color = Color.Black)
                     Text("No TRX: ${rx.id}", fontSize = 11.sp, color = Color.Black)
                     Text("Kasir: ${rx.kasirNama}", fontSize = 11.sp, color = Color.Black)
@@ -752,13 +1138,14 @@ fun CashierScreen(viewModel: KasirViewModel) {
                             val qty = parts.getOrNull(2)?.toIntOrNull() ?: 1
                             val price = parts.getOrNull(3)?.toDoubleOrNull() ?: 0.0
                             val disc = parts.getOrNull(5)?.toDoubleOrNull() ?: 0.0
+                            val sat = parts.getOrNull(6).orEmpty().takeIf { it.isNotBlank() } ?: "Pcs"
                             val itemSub = (price - disc) * qty
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text("$name x$qty", fontSize = 11.sp, color = Color.Black)
+                                Text("$name x$qty $sat", fontSize = 11.sp, color = Color.Black)
                                 Text(idrFormatter.format(itemSub), fontSize = 11.sp, color = Color.Black)
                             }
                         }

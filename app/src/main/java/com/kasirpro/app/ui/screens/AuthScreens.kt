@@ -107,15 +107,13 @@ fun LoginScreen(viewModel: KasirViewModel) {
                                     isLoading = true
                                     errorMessage = null
                                     scope.launch {
-                                        val success = viewModel.repository.loginWithGoogle("sandbox-bypass")
+                                        val loginResult = viewModel.repository.loginWithGoogle("sandbox-bypass")
                                         isLoading = false
-                                        if (success) {
-                                            val user = viewModel.repository.getCurrentUserRaw()
-                                            val biz = viewModel.repository.getCurrentBusinessRaw()
-                                            if (user?.role == "owner" && biz == null) {
-                                                viewModel.activeScreen.value = "setup_toko"
-                                            } else if (user?.role == "kasir") {
+                                        if (loginResult.success) {
+                                            if (loginResult.role == "kasir") {
                                                 viewModel.activeScreen.value = "cashier"
+                                            } else if (loginResult.isNewUser) {
+                                                viewModel.activeScreen.value = "setup_toko"
                                             } else {
                                                 viewModel.activeScreen.value = "home"
                                             }
@@ -278,14 +276,12 @@ fun LoginScreen(viewModel: KasirViewModel) {
                                 val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
                                 val idToken = googleIdTokenCredential.idToken
                                 
-                                val success = viewModel.repository.loginWithGoogle(idToken)
-                                if (success) {
-                                    val user = viewModel.repository.getCurrentUserRaw()
-                                    val biz = viewModel.repository.getCurrentBusinessRaw()
-                                    if (user?.role == "owner" && biz == null) {
-                                        viewModel.activeScreen.value = "setup_toko"
-                                    } else if (user?.role == "kasir") {
+                                val loginResult = viewModel.repository.loginWithGoogle(idToken)
+                                if (loginResult.success) {
+                                    if (loginResult.role == "kasir") {
                                         viewModel.activeScreen.value = "cashier"
+                                    } else if (loginResult.isNewUser) {
+                                        viewModel.activeScreen.value = "setup_toko"
                                     } else {
                                         viewModel.activeScreen.value = "home"
                                     }

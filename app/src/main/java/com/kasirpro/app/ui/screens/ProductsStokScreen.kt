@@ -10,6 +10,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -19,12 +23,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import com.kasirpro.app.util.BarcodeScannerHelper
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.kasirpro.app.data.local.*
@@ -34,6 +41,21 @@ import com.kasirpro.app.ui.theme.*
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
 import java.util.Locale
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.graphics.graphicsLayer
+import android.net.Uri
+import coil.compose.AsyncImage
+import com.kasirpro.app.util.ImageHelper
+import com.kasirpro.app.util.ProductImage
+import com.kasirpro.app.util.ExcelHelper
+import java.util.UUID
+import android.provider.OpenableColumns
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,14 +71,42 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
 
     // Dialog state controllers
     var showAddProductDialog by remember { mutableStateOf(false) }
+    var showBulkUploadDialog by remember { mutableStateOf(false) }
     var showRestockDialogItem by remember { mutableStateOf<ProductEntity?>(null) }
     var showOpnameDialogItem by remember { mutableStateOf<ProductEntity?>(null) }
     var editProductItem by remember { mutableStateOf<ProductEntity?>(null) }
 
+    val coroutineScope = rememberCoroutineScope()
+
+    val templateSaverLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    ExcelHelper.writeProductTemplateXlsx(out)
+                    Toast.makeText(context, "Template Excel berhasil didownload!", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(context, "Gagal mendownload template: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     val idrFormatter = NumberFormat.getCurrencyInstance(Locale("id", "ID"))
     idrFormatter.maximumFractionDigits = 0
 
+    val addProductInteractionSource = remember { MutableInteractionSource() }
+    val isAddProductPressed by addProductInteractionSource.collectIsPressedAsState()
+    val addProductScale by animateFloatAsState(
+        targetValue = if (isAddProductPressed) 0.9f else 1.0f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMedium),
+        label = "add_product_scale"
+    )
+
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = { Text("Kelola Produk & Stok", fontWeight = FontWeight.Bold) },
@@ -69,15 +119,51 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                 },
                 actions = {
                     if (activeTab == "PRODUK" && !isKasir) {
-                        IconButton(
-                            onClick = { showAddProductDialog = true },
-                            modifier = Modifier.testTag("add_product_action_btn")
+                        Button(
+                            onClick = { showBulkUploadDialog = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.padding(end = 6.dp).testTag("bulk_upload_action_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                         ) {
-                            Icon(imageVector = Icons.Default.Add, contentDescription = "Tambah Produk", tint = OrangePrimary)
+                            Icon(
+                                imageVector = Icons.Default.CloudUpload,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Upload Massal", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
             )
+        },
+        floatingActionButton = {
+            if (activeTab == "PRODUK" && !isKasir) {
+                FloatingActionButton(
+                    onClick = { showAddProductDialog = true },
+                    shape = CircleShape,
+                    containerColor = OrangePrimary,
+                    contentColor = Color.White,
+                    elevation = FloatingActionButtonDefaults.elevation(
+                        defaultElevation = 8.dp,
+                        pressedElevation = 4.dp
+                    ),
+                    interactionSource = addProductInteractionSource,
+                    modifier = Modifier
+                        .graphicsLayer(scaleX = addProductScale, scaleY = addProductScale)
+                        .testTag("add_product_action_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Tambah Produk",
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
         }
     ) { innerPadding ->
         Column(
@@ -125,10 +211,10 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                         )
                     } else {
                         LazyColumn(
-                            contentPadding = PaddingValues(16.dp),
+                            contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 88.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            items(productsList) { prod ->
+                             items(productsList) { prod ->
                                 Card(
                                     modifier = Modifier.fillMaxWidth(),
                                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -140,10 +226,45 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(prod.nama, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                            Text("Modal: ${idrFormatter.format(prod.hargaModal)} • Jual: ${idrFormatter.format(prod.hargaJual)}", fontSize = 12.sp, color = Color.Gray)
-                                            Text("Sisa Stok: ${prod.stok} unit", fontSize = 11.sp, color = if (prod.stok <= prod.stokMinimum) Color.Red else Color.Gray, fontWeight = FontWeight.SemiBold)
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(52.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                ProductImage(
+                                                    fotoUrl = prod.fotoUrl,
+                                                    contentDescription = prod.nama,
+                                                    modifier = Modifier.fillMaxSize()
+                                                )
+                                            }
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(prod.nama, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                                if (prod.kategori.isNotBlank()) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .padding(vertical = 2.dp)
+                                                            .clip(RoundedCornerShape(4.dp))
+                                                            .background(OrangePrimary.copy(alpha = 0.1f))
+                                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = prod.kategori,
+                                                            fontSize = 10.sp,
+                                                            color = OrangePrimary,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
+                                                Text("Modal: ${idrFormatter.format(prod.hargaModal)} • Jual: ${idrFormatter.format(prod.hargaJual)}", fontSize = 12.sp, color = Color.Gray)
+                                                Text("Sisa Stok: ${prod.stok} ${prod.satuan}", fontSize = 11.sp, color = if (prod.stok <= prod.stokMinimum) Color.Red else Color.Gray, fontWeight = FontWeight.SemiBold)
+                                            }
                                         }
 
                                         if (!isKasir) {
@@ -164,7 +285,7 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                 }
                 "STOK" -> {
                     LazyColumn(
-                        contentPadding = PaddingValues(16.dp),
+                        contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 88.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         items(productsList) { prod ->
@@ -228,7 +349,7 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                         EmptyStateIllustration(title = "Belum Ada Mutasi", desc = "Seluruh log penjualan kasir dan penyesuaian resupply tercatat lengkap di riwayat ini.")
                     } else {
                         LazyColumn(
-                            contentPadding = PaddingValues(16.dp),
+                            contentPadding = PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 88.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             items(stockHistList) { log ->
@@ -280,17 +401,36 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
     // Modal: Add New Product Dialog
     if (showAddProductDialog) {
         var addNama by remember { mutableStateOf("") }
-        var addKategori by remember { mutableStateOf("Makanan") }
+        var addKategori by remember { mutableStateOf("") }
         var addHargaJual by remember { mutableStateOf("") }
         var addHargaModal by remember { mutableStateOf("") }
         var addStok by remember { mutableStateOf("") }
-        var addMinStok by remember { mutableStateOf("") }
+        var addMinStok by remember { mutableStateOf("5") }
         var addBarcode by remember { mutableStateOf("") }
+        var addSatuan by remember { mutableStateOf("Pcs") }
+
+        var addImgBytes by remember { mutableStateOf<ByteArray?>(null) }
+        var addImgUri by remember { mutableStateOf<Uri?>(null) }
+        var isUploadingPhoto by remember { mutableStateOf(false) }
+
+        val galleryLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.GetContent()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                addImgUri = uri
+                val compressed = ImageHelper.compressImageUri(context, uri)
+                if (compressed != null) {
+                    addImgBytes = compressed
+                } else {
+                    Toast.makeText(context, "Gagal memproses foto", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
 
         var showBarcodeScannerSim by remember { mutableStateOf(false) }
 
         AlertDialog(
-            onDismissRequest = { showAddProductDialog = false },
+            onDismissRequest = { if (!isUploadingPhoto) showAddProductDialog = false },
             title = { Text("Tambah Produk Jualan Baru", fontWeight = FontWeight.Bold) },
             text = {
                 Column(
@@ -299,17 +439,105 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState())
                 ) {
+                    // Photo Upload Area
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(140.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { galleryLauncher.launch("image/*") },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (addImgUri != null) {
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                AsyncImage(
+                                    model = addImgUri,
+                                    contentDescription = "Preview",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                // Delete/Clear photo overlay
+                                FilledIconButton(
+                                    onClick = {
+                                        addImgUri = null
+                                        addImgBytes = null
+                                    },
+                                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.Red),
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(8.dp)
+                                        .size(36.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Clear", tint = Color.White, modifier = Modifier.size(18.dp))
+                                }
+
+                                // Size info badge
+                                val kbSize = (addImgBytes?.size ?: 0) / 1024
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(8.dp)
+                                        .background(Color.Black.copy(alpha = 0.6f), shape = RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Ukuran: ${kbSize}KB", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(imageVector = Icons.Default.CloudUpload, contentDescription = null, tint = OrangePrimary, modifier = Modifier.size(36.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text("Pilih Foto dari Galeri (Max 500KB)", fontSize = 11.sp, color = Color.Gray)
+                            }
+                        }
+                    }
+
                     OutlinedTextField(value = addNama, onValueChange = { addNama = it }, label = { Text("Nama Produk") }, modifier = Modifier.fillMaxWidth().testTag("add_prod_nama"))
-                    OutlinedTextField(value = addKategori, onValueChange = { addKategori = it }, label = { Text("Kategori") }, modifier = Modifier.fillMaxWidth())
+                    
+                    CategorySelectionField(
+                        value = addKategori,
+                        onValueChange = { addKategori = it },
+                        productsList = productsList
+                    )
+                    
+                    SatuanSelectionField(
+                        value = addSatuan,
+                        onValueChange = { addSatuan = it }
+                    )
                     
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedTextField(value = addHargaJual, onValueChange = { addHargaJual = it }, label = { Text("Harga Jual") }, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = addHargaModal, onValueChange = { addHargaModal = it }, label = { Text("Harga Modal") }, modifier = Modifier.weight(1f))
+                        OutlinedTextField(
+                            value = addHargaJual,
+                            onValueChange = { addHargaJual = it },
+                            label = { Text("Harga Jual") },
+                            modifier = Modifier.weight(1f).testTag("add_prod_harga_jual"),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                        OutlinedTextField(
+                            value = addHargaModal,
+                            onValueChange = { addHargaModal = it },
+                            label = { Text("Harga Modal") },
+                            modifier = Modifier.weight(1f).testTag("add_prod_harga_modal"),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedTextField(value = addStok, onValueChange = { addStok = it }, label = { Text("Stok Awal") }, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = addMinStok, onValueChange = { addMinStok = it }, label = { Text("Stok Minimum") }, modifier = Modifier.weight(1f))
+                        OutlinedTextField(
+                            value = addStok,
+                            onValueChange = { addStok = it },
+                            label = { Text("Stok Awal") },
+                            modifier = Modifier.weight(1f).testTag("add_prod_stok"),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                        OutlinedTextField(
+                            value = addMinStok,
+                            onValueChange = { addMinStok = it },
+                            label = { Text("Stok Minimum") },
+                            modifier = Modifier.weight(1f).testTag("add_prod_min_stok"),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
                     }
 
                     Row(
@@ -326,6 +554,17 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                             Icon(imageVector = Icons.Default.QrCodeScanner, contentDescription = "Scan", tint = OrangePrimary)
                         }
                     }
+
+                    if (isUploadingPhoto) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = OrangePrimary)
+                            Text("Mengupload foto ke Fire Storage...", fontSize = 11.sp, color = Color.Gray)
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -339,22 +578,45 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                         }
 
                         if (addNama.isBlank() || addHargaJual.isBlank() || addHargaModal.isBlank() || addStok.isBlank() || addMinStok.isBlank()) {
+                            Toast.makeText(context, "Silakan isi semua data wajib!", Toast.LENGTH_SHORT).show()
                             return@Button
                         }
 
-                        viewModel.addProduct(
-                            nama = addNama,
-                            kategori = addKategori,
-                            hargaJual = addHargaJual.toDoubleOrNull() ?: 0.0,
-                            hargaModal = addHargaModal.toDoubleOrNull() ?: 0.0,
-                            stok = addStok.toIntOrNull() ?: 0,
-                            stokMinimum = addMinStok.toIntOrNull() ?: 0,
-                            barcode = if (addBarcode.isBlank()) null else addBarcode,
-                            fotoUrl = null,
-                            varianList = emptyList()
-                        )
-                        showAddProductDialog = false
+                        val ownerId = currentUserState?.uid ?: "owner-main"
+                        val productId = UUID.randomUUID().toString()
+
+                        isUploadingPhoto = true
+                        coroutineScope.launch {
+                            var uploadedUrl: String? = null
+                            val bytes = addImgBytes
+                            if (bytes != null) {
+                                try {
+                                    uploadedUrl = ImageHelper.uploadProductImage(context, ownerId, productId, bytes)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                    Toast.makeText(context, "Gagal mengupload foto: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+
+                            viewModel.addProductWithBranch(
+                                id = productId,
+                                nama = addNama,
+                                kategori = addKategori,
+                                hargaJual = addHargaJual.toDoubleOrNull() ?: 0.0,
+                                hargaModal = addHargaModal.toDoubleOrNull() ?: 0.0,
+                                stok = addStok.toIntOrNull() ?: 0,
+                                stokMinimum = addMinStok.toIntOrNull() ?: 5,
+                                barcode = if (addBarcode.isBlank()) null else addBarcode,
+                                fotoUrl = uploadedUrl,
+                                branchId = "branch-1-$ownerId", // default branch ID of owner
+                                satuan = addSatuan
+                            )
+                            isUploadingPhoto = false
+                            showAddProductDialog = false
+                            Toast.makeText(context, "Menyimpan Produk", Toast.LENGTH_SHORT).show()
+                        }
                     },
+                    enabled = !isUploadingPhoto,
                     colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary),
                     modifier = Modifier.testTag("submit_new_prod")
                 ) {
@@ -362,7 +624,7 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showAddProductDialog = false }) { Text("Batal") }
+                TextButton(onClick = { if (!isUploadingPhoto) showAddProductDialog = false }, enabled = !isUploadingPhoto) { Text("Batal") }
             }
         )
 
@@ -490,39 +752,766 @@ fun ProductsStokScreen(viewModel: KasirViewModel) {
     if (editProductItem != null) {
         val prod = editProductItem!!
         var eNama by remember { mutableStateOf(prod.nama) }
+        var eKategori by remember { mutableStateOf("") }
         var eHargaJual by remember { mutableStateOf(prod.hargaJual.toString()) }
         var eHargaModal by remember { mutableStateOf(prod.hargaModal.toString()) }
+        var eStok by remember { mutableStateOf(prod.stok.toString()) }
+        var eMinStok by remember { mutableStateOf(prod.stokMinimum.toString()) }
+        var eBarcode by remember { mutableStateOf(prod.barcode ?: "") }
+        var eSatuan by remember { mutableStateOf(prod.satuan) }
+        
+        var eImgBytes by remember { mutableStateOf<ByteArray?>(null) }
+        var eImgUri by remember { mutableStateOf<Uri?>(null) }
+        var eFotoUrlState by remember { mutableStateOf(prod.fotoUrl) }
+        var isEditingUploading by remember { mutableStateOf(false) }
+
+        val editGalleryLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.GetContent()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                eImgUri = uri
+                val compressed = ImageHelper.compressImageUri(context, uri)
+                if (compressed != null) {
+                    eImgBytes = compressed
+                } else {
+                    Toast.makeText(context, "Gagal memproses foto", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
 
         AlertDialog(
-            onDismissRequest = { editProductItem = null },
-            title = { Text("Edit Detail Produk") },
+            onDismissRequest = { if (!isEditingUploading) editProductItem = null },
+            title = { Text("Edit Detail Produk", fontWeight = FontWeight.Bold) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(value = eNama, onValueChange = { eNama = it }, label = { Text("Nama Produk") })
-                    OutlinedTextField(value = eHargaJual, onValueChange = { eHargaJual = it }, label = { Text("Harga Jual") })
-                    OutlinedTextField(value = eHargaModal, onValueChange = { eHargaModal = it }, label = { Text("Harga Modal") })
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    // Photo Upload / Change / Remove Area
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(140.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { editGalleryLauncher.launch("image/*") },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (eImgUri != null) {
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                AsyncImage(
+                                    model = eImgUri,
+                                    contentDescription = "Preview",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                FilledIconButton(
+                                    onClick = {
+                                        eImgUri = null
+                                        eImgBytes = null
+                                        eFotoUrlState = null
+                                    },
+                                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.Red),
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(8.dp)
+                                        .size(36.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Clear", tint = Color.White, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        } else if (!eFotoUrlState.isNullOrBlank()) {
+                            Box(modifier = Modifier.fillMaxSize()) {
+                                ProductImage(
+                                    fotoUrl = eFotoUrlState,
+                                    contentDescription = prod.nama,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                FilledIconButton(
+                                    onClick = {
+                                        eFotoUrlState = null
+                                        eImgBytes = null
+                                        eImgUri = null
+                                    },
+                                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.Red),
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(8.dp)
+                                        .size(36.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Clear", tint = Color.White, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(imageVector = Icons.Default.PhotoCamera, contentDescription = null, tint = OrangePrimary, modifier = Modifier.size(36.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text("Ganti atau Tambah Foto Produk", fontSize = 11.sp, color = Color.Gray)
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(value = eNama, onValueChange = { eNama = it }, label = { Text("Nama Produk") }, modifier = Modifier.fillMaxWidth())
+                    
+                    CategorySelectionField(
+                        value = eKategori,
+                        onValueChange = { eKategori = it },
+                        productsList = productsList
+                    )
+
+                    SatuanSelectionField(
+                        value = eSatuan,
+                        onValueChange = { eSatuan = it }
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedTextField(
+                            value = eHargaJual,
+                            onValueChange = { eHargaJual = it },
+                            label = { Text("Harga Jual") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                        OutlinedTextField(
+                            value = eHargaModal,
+                            onValueChange = { eHargaModal = it },
+                            label = { Text("Harga Modal") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedTextField(
+                            value = eStok,
+                            onValueChange = { eStok = it },
+                            label = { Text("Stok") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                        OutlinedTextField(
+                            value = eMinStok,
+                            onValueChange = { eMinStok = it },
+                            label = { Text("Stok Minimum") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                        )
+                    }
+
+                    OutlinedTextField(value = eBarcode, onValueChange = { eBarcode = it }, label = { Text("Barcode (Optional)") }, modifier = Modifier.fillMaxWidth())
+
+                    if (isEditingUploading) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = OrangePrimary)
+                            Text("Menyimpan perubahan dan foto...", fontSize = 11.sp, color = Color.Gray)
+                        }
+                    }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        val updated = prod.copy(
-                            nama = eNama,
-                            hargaJual = eHargaJual.toDoubleOrNull() ?: prod.hargaJual,
-                            hargaModal = eHargaModal.toDoubleOrNull() ?: prod.hargaModal
-                        )
-                        viewModel.editProduct(updated)
-                        editProductItem = null
+                        if (eNama.isBlank() || eHargaJual.isBlank() || eHargaModal.isBlank() || eStok.isBlank() || eMinStok.isBlank()) {
+                            Toast.makeText(context, "Silakan lengkapi semua parameter wajib!", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+
+                        val ownerId = currentUserState?.uid ?: "owner-main"
+                        isEditingUploading = true
+
+                        coroutineScope.launch {
+                            var finalFotoUrl = eFotoUrlState
+                            val bytes = eImgBytes
+                            if (bytes != null) {
+                                try {
+                                    finalFotoUrl = ImageHelper.uploadProductImage(context, ownerId, prod.id, bytes)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                    Toast.makeText(context, "Gagal upload foto: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+
+                            val updated = prod.copy(
+                                nama = eNama,
+                                kategori = eKategori,
+                                hargaJual = eHargaJual.toDoubleOrNull() ?: prod.hargaJual,
+                                hargaModal = eHargaModal.toDoubleOrNull() ?: prod.hargaModal,
+                                stok = eStok.toIntOrNull() ?: prod.stok,
+                                stokMinimum = eMinStok.toIntOrNull() ?: prod.stokMinimum,
+                                barcode = eBarcode.takeIf { it.isNotBlank() },
+                                fotoUrl = finalFotoUrl,
+                                satuan = eSatuan
+                            )
+                            viewModel.editProduct(updated)
+                            isEditingUploading = false
+                            editProductItem = null
+                            Toast.makeText(context, "Menyimpan Produk", Toast.LENGTH_SHORT).show()
+                        }
                     },
+                    enabled = !isEditingUploading,
                     colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary)
                 ) {
                     Text("Update")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { editProductItem = null }) { Text("Batal") }
+                TextButton(onClick = { if (!isEditingUploading) editProductItem = null }, enabled = !isEditingUploading) { Text("Batal") }
             }
         )
+    }
+
+    // Modal: Bulk Upload Products
+    if (showBulkUploadDialog) {
+        val destBranches by viewModel.branches.collectAsState()
+        var selectedBranch by remember { mutableStateOf<BranchEntity?>(null) }
+        
+        var excelFileUri by remember { mutableStateOf<Uri?>(null) }
+        var excelFileName by remember { mutableStateOf("") }
+        var selectedProductPhotos by remember { mutableStateOf<List<Uri>>(emptyList()) }
+        var parsedProducts by remember { mutableStateOf<List<ParsedBulkProduct>>(emptyList()) }
+        var embeddedPhotos by remember { mutableStateOf<Map<Int, ByteArray>>(emptyMap()) }
+        
+        var isUploading by remember { mutableStateOf(false) }
+        var uploadStatusText by remember { mutableStateOf("") }
+        var uploadProgress by remember { mutableStateOf(0f) }
+
+        // Automatically default select first branch
+        LaunchedEffect(destBranches) {
+            if (selectedBranch == null && destBranches.isNotEmpty()) {
+                selectedBranch = destBranches.first()
+            }
+        }
+
+        val filePickerLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.GetContent()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                excelFileUri = uri
+                excelFileName = getFileNameFromUri(context, uri)
+                try {
+                    context.contentResolver.openInputStream(uri)?.use { stream ->
+                        val isSpreadsheet = excelFileName.endsWith(".xlsx", ignoreCase = true)
+                        val raw = ExcelHelper.parseStream(stream, isSpreadsheet)
+                        if (raw.isNotEmpty()) {
+                            // Drop headers
+                            parsedProducts = raw.drop(1).mapIndexed { index, row ->
+                                validateRow(row, index + 2)
+                            }
+                        } else {
+                            Toast.makeText(context, "File kosong atau tidak dapat di-parse", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    val isSpreadsheet = excelFileName.endsWith(".xlsx", ignoreCase = true)
+                    if (isSpreadsheet) {
+                        context.contentResolver.openInputStream(uri)?.use { imgStream ->
+                            embeddedPhotos = ExcelHelper.extractImagesFromXlsx(imgStream)
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    Toast.makeText(context, "Gagal mengimpor spreadsheet: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        val photosPickerLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.GetMultipleContents()
+        ) { uris: List<Uri>? ->
+            if (uris != null) {
+                selectedProductPhotos = uris
+                Toast.makeText(context, "Berhasil melampirkan ${uris.size} foto produk!", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { if (!isUploading) showBulkUploadDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(imageVector = Icons.Default.CloudUpload, contentDescription = null, tint = OrangePrimary)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Upload Produk Massal (.xlsx / .csv)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                }
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    // Step 1: Branch Picker
+                    Text("1. Pilih Cabang Toko Tujuan", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = Color.Gray)
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        var branchExpanded by remember { mutableStateOf(false) }
+                        OutlinedButton(
+                            onClick = { branchExpanded = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(selectedBranch?.namaCabang ?: "Pilih Cabang...")
+                        }
+                        DropdownMenu(expanded = branchExpanded, onDismissRequest = { branchExpanded = false }) {
+                            destBranches.forEach { br ->
+                                DropdownMenuItem(
+                                    text = { Text(br.namaCabang) },
+                                    onClick = {
+                                        selectedBranch = br
+                                        branchExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    // Step 2: Download Template
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("2. Unduh Template Resmi", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = Color.Gray)
+                        TextButton(
+                            onClick = { templateSaverLauncher.launch("template_upload_massal_kasirpro.xlsx") },
+                            colors = ButtonDefaults.textButtonColors(contentColor = OrangePrimary)
+                        ) {
+                            Icon(imageVector = Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Download Template")
+                        }
+                    }
+
+                    // Step 3: Select Spreadsheet File
+                    Text("3. Pilih Spreadsheet (.xlsx / .csv)", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = Color.Gray)
+                    OutlinedButton(
+                        onClick = { filePickerLauncher.launch("*/*") },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = OrangePrimary),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.InsertDriveFile, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (excelFileUri != null) excelFileName else "Pilih File Excel / CSV")
+                    }
+
+                    // Step 4: Optional Multiple Photo uploads
+                    Text("4. Lampirkan Folder/File Foto (Opsional)", fontWeight = FontWeight.SemiBold, fontSize = 12.sp, color = Color.Gray)
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        OutlinedButton(
+                            onClick = { photosPickerLauncher.launch("image/*") },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.DarkGray),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.AddPhotoAlternate, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(if (selectedProductPhotos.isNotEmpty()) "Terpilih ${selectedProductPhotos.size} foto" else "Pilih Beberapa Foto")
+                        }
+                        if (selectedProductPhotos.isNotEmpty()) {
+                            Text("Foto akan dicocokkan otomatis dengan kolom 'Nama File Foto' di spreadsheet.", fontSize = 10.sp, color = Color.LightGray)
+                        }
+                    }
+
+                    // Step 5: Table Data Preview
+                    if (parsedProducts.isNotEmpty()) {
+                        val validCount = parsedProducts.count { it.isValid }
+                        val invalidCount = parsedProducts.size - validCount
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Preview & Validasi Data (${parsedProducts.size} Baris)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFFE8F5E9))
+                                    .padding(8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("Valid: $validCount", fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32), fontSize = 12.sp)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFFFFEAEE))
+                                    .padding(8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text("Error: $invalidCount", fontWeight = FontWeight.Bold, color = Color(0xFFC62828), fontSize = 12.sp)
+                            }
+                        }
+
+                        // Preview Table
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 200.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                .padding(6.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            parsedProducts.forEach { item ->
+                                val bgColor = if (item.isValid) Color(0xFFE8F5E9) else Color(0xFFFFEAEE)
+                                val textColor = if (item.isValid) Color(0xFF1B5E20) else Color(0xFFB71C1C)
+                                val statusLabel = if (item.isValid) "Baris ${item.rowNum}: OK" else "Baris ${item.rowNum}: ERROR"
+
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = bgColor)
+                                ) {
+                                    Column(modifier = Modifier.padding(8.dp)) {
+                                        Text(statusLabel, fontWeight = FontWeight.Bold, fontSize = 11.sp, color = textColor)
+                                        Text("Nama: ${item.nama.ifBlank { "[KOSONG]" }} | Kategori: ${item.kategori.ifBlank { "[KOSONG]" }}", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                        Text("Jual: ${idrFormatter.format(item.hargaJual)} | Stok: ${item.stok}", fontSize = 10.sp, color = Color.DarkGray)
+                                        if (!item.isValid && item.errorMessage != null) {
+                                            Text("Detail Error: ${item.errorMessage}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.Red)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Progress Loader Screen
+                    if (isUploading) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            LinearProgressIndicator(
+                                progress = uploadProgress,
+                                color = OrangePrimary,
+                                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))
+                            )
+                            Text(uploadStatusText, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = OrangePrimary)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                val validProducts = parsedProducts.filter { it.isValid }
+                Button(
+                    onClick = {
+                        val limitCheck = !isPremiumState && (productsList.size + validProducts.size) > 10
+                        if (limitCheck) {
+                            Toast.makeText(context, "Jumlah total melebihi batas 10 produk untuk akun Gratis. upgrade ke premium!", Toast.LENGTH_LONG).show()
+                            return@Button
+                        }
+
+                        if (selectedBranch == null) {
+                            Toast.makeText(context, "Silakan pilih cabang tujuan!", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+
+                        isUploading = true
+                        uploadProgress = 0f
+                        uploadStatusText = "Memulai bulk upload..."
+
+                        coroutineScope.launch {
+                            val ownerId = currentUserState?.uid ?: "owner-main"
+                            val targetBranchId = selectedBranch!!.id
+                            var successCount = 0
+
+                            validProducts.forEachIndexed { idx, p ->
+                                uploadStatusText = "Proses baris ${p.rowNum}: ${p.nama}..."
+                                uploadProgress = (idx.toFloat() / validProducts.size)
+
+                                var imageUrl: String? = null
+                                
+                                // Priority 1: Check embeddedPhotos extracted from XLSX directly
+                                val embeddedBytes = embeddedPhotos[p.rowNum]
+                                if (embeddedBytes != null) {
+                                    uploadStatusText = "Memproses foto: ${p.nama}..."
+                                    try {
+                                        val pId = UUID.randomUUID().toString()
+                                        imageUrl = ImageHelper.uploadProductImage(context, ownerId, pId, embeddedBytes)
+                                    } catch (e: Exception) {
+                                        e.printStackTrace()
+                                    }
+                                } else {
+                                    // Priority 2: Fallback to matched photo name selected from multiple photos
+                                    val matchedUri = selectedProductPhotos.find { photoUri ->
+                                        val localFilename = getFileNameFromUri(context, photoUri)
+                                        localFilename.equals(p.fotoName, ignoreCase = true)
+                                    }
+
+                                    if (matchedUri != null) {
+                                        uploadStatusText = "Memproses foto: ${p.fotoName}..."
+                                        val bytes = ImageHelper.compressImageUri(context, matchedUri)
+                                        if (bytes != null) {
+                                            try {
+                                                val pId = UUID.randomUUID().toString()
+                                                imageUrl = ImageHelper.uploadProductImage(context, ownerId, pId, bytes)
+                                            } catch (e: Exception) {
+                                                e.printStackTrace()
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val singleProdId = UUID.randomUUID().toString()
+                                val successResult = viewModel.repository.insertProductWithBranch(
+                                    id = singleProdId,
+                                    nama = p.nama,
+                                    kategori = p.kategori,
+                                    hargaJual = p.hargaJual,
+                                    hargaModal = p.hargaModal,
+                                    stok = p.stok,
+                                    stokMinimum = p.stokMinimum,
+                                    barcode = p.barcode,
+                                    fotoUrl = imageUrl,
+                                    branchId = targetBranchId,
+                                    satuan = p.satuan
+                                )
+                                if (successResult) {
+                                    successCount++
+                                }
+                            }
+
+                            isUploading = false
+                            showBulkUploadDialog = false
+                            Toast.makeText(context, "Sukses mengupload $successCount produk ke Cabang ${selectedBranch!!.namaCabang}!", Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    enabled = parsedProducts.any { it.isValid } && !isUploading,
+                    colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary)
+                ) {
+                    Text("Mulai Simpan")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { if (!isUploading) showBulkUploadDialog = false }, enabled = !isUploading) { Text("Batal") }
+            }
+        )
+    }
+}
+
+data class ParsedBulkProduct(
+    val rowNum: Int,
+    val rawRow: List<String>,
+    val nama: String,
+    val kategori: String,
+    val hargaJual: Double,
+    val hargaModal: Double,
+    val stok: Int,
+    val stokMinimum: Int,
+    val barcode: String?,
+    val fotoName: String?,
+    val satuan: String,
+    val isValid: Boolean,
+    val errorMessage: String?
+)
+
+fun validateRow(row: List<String>, rowIndex: Int): ParsedBulkProduct {
+    val nama = row.getOrNull(0)?.trim() ?: ""
+    val kategori = row.getOrNull(1)?.trim() ?: ""
+    val rawHargaJual = row.getOrNull(2)?.trim() ?: ""
+    val rawHargaModal = row.getOrNull(3)?.trim() ?: ""
+    val rawStok = row.getOrNull(4)?.trim() ?: ""
+    val rawMinStok = row.getOrNull(5)?.trim() ?: ""
+    val barcode = row.getOrNull(6)?.trim()?.takeIf { it.isNotBlank() }
+    val fotoName = row.getOrNull(7)?.trim()?.takeIf { it.isNotBlank() }
+    val satuan = row.getOrNull(8)?.trim()?.takeIf { it.isNotBlank() } ?: "Pcs"
+
+    var isValid = true
+    val errors = mutableListOf<String>()
+
+    if (nama.isBlank()) {
+        isValid = false
+        errors.add("Nama produk wajib diisi.")
+    }
+    if (kategori.isBlank()) {
+        isValid = false
+        errors.add("Kategori wajib diisi.")
+    }
+
+    val jPrice = rawHargaJual.toDoubleOrNull()
+    if (jPrice == null || jPrice <= 0.0) {
+        isValid = false
+        errors.add("Harga jual harus angka valid > 0.")
+    }
+
+    val mPrice = rawHargaModal.toDoubleOrNull() ?: 0.0
+
+    val startStock = rawStok.toIntOrNull()
+    if (startStock == null) {
+        isValid = false
+        errors.add("Stok awal harus angka.")
+    } else if (startStock < 0) {
+        isValid = false
+        errors.add("Stok awal tidak boleh negatif.")
+    }
+
+    val minSt = rawMinStok.toIntOrNull() ?: 5
+
+    return ParsedBulkProduct(
+        rowNum = rowIndex,
+        rawRow = row,
+        nama = nama,
+        kategori = kategori,
+        hargaJual = jPrice ?: 0.0,
+        hargaModal = mPrice,
+        stok = startStock ?: 0,
+        stokMinimum = minSt,
+        barcode = barcode,
+        fotoName = fotoName,
+        satuan = satuan,
+        isValid = isValid,
+        errorMessage = if (isValid) null else errors.joinToString("; ")
+    )
+}
+
+fun getFileNameFromUri(context: android.content.Context, uri: Uri): String {
+    var result: String? = null
+    if (uri.scheme == "content") {
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+        try {
+            if (cursor != null && cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index != -1) {
+                    result = cursor.getString(index)
+                }
+            }
+        } finally {
+            cursor?.close()
+        }
+    }
+    if (result == null) {
+        result = uri.path
+        val cut = result?.lastIndexOf('/') ?: -1
+        if (cut != -1) {
+            result = result?.substring(cut + 1)
+        }
+    }
+    return result ?: "unnamed.png"
+}
+
+@Composable
+fun CategorySelectionField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    productsList: List<ProductEntity>
+) {
+    val predefined = listOf("Makanan", "Minuman", "Snack", "Rokok", "Sembako", "Kebersihan", "Kesehatan", "Elektronik", "Pakaian", "Alat Tulis", "Lainnya")
+    
+    // Sort historic by frequency
+    val categoryFrequencies = productsList.map { it.kategori }
+        .filter { it.isNotBlank() }
+        .groupingBy { it }
+        .eachCount()
+    
+    val frequentSorted = categoryFrequencies.entries
+        .sortedByDescending { it.value }
+        .map { it.key }
+        .take(5)
+
+    // Combine distinct
+    val allOptions = (frequentSorted + predefined).distinct()
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text("Kategori") },
+            modifier = Modifier.fillMaxWidth().testTag("add_prod_kategori"),
+            singleLine = true
+        )
+        
+        Spacer(modifier = Modifier.height(6.dp))
+        
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            allOptions.forEach { category ->
+                val isSelected = value.equals(category, ignoreCase = true)
+                val chipColor = if (isSelected) OrangePrimary else Color.LightGray.copy(alpha = 0.2f)
+                val textColor = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
+
+                Box(
+                    modifier = Modifier
+                        .background(color = chipColor, shape = RoundedCornerShape(16.dp))
+                        .clickable { onValueChange(category) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (frequentSorted.contains(category) && !predefined.contains(category)) {
+                            Icon(
+                                imageVector = Icons.Default.Star,
+                                contentDescription = null,
+                                tint = if (isSelected) Color.White else OrangePrimary,
+                                modifier = Modifier.size(12.dp).padding(end = 4.dp)
+                            )
+                        }
+                        Text(
+                            text = category,
+                            fontSize = 12.sp,
+                            color = textColor,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SatuanSelectionField(
+    value: String,
+    onValueChange: (String) -> Unit
+) {
+    val predefinedUnits = listOf("Pcs", "Kg", "Gram", "Liter", "Ml", "Lusin", "Karton", "Pack", "Botol", "Sachet", "Lainnya")
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = { Text("Satuan") },
+            modifier = Modifier.fillMaxWidth().testTag("add_prod_satuan"),
+            singleLine = true
+        )
+        
+        Spacer(modifier = Modifier.height(6.dp))
+        
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            predefinedUnits.forEach { unit ->
+                val isSelected = value.equals(unit, ignoreCase = true)
+                val chipColor = if (isSelected) OrangePrimary else Color.LightGray.copy(alpha = 0.2f)
+                val textColor = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface
+
+                Box(
+                    modifier = Modifier
+                        .background(color = chipColor, shape = RoundedCornerShape(16.dp))
+                        .clickable { onValueChange(unit) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = unit,
+                        fontSize = 12.sp,
+                        color = textColor,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+        }
     }
 }
 

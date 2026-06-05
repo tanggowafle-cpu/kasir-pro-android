@@ -1,6 +1,9 @@
 package com.kasirpro.app.ui.screens
 
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -8,6 +11,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -16,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -25,6 +31,9 @@ import androidx.compose.ui.unit.sp
 import com.kasirpro.app.data.local.*
 import com.kasirpro.app.ui.viewmodel.KasirViewModel
 import com.kasirpro.app.ui.theme.*
+import com.kasirpro.app.util.ImageHelper
+import com.kasirpro.app.util.ShopLogoImage
+import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -44,12 +53,262 @@ fun BackupSettingsScreen(viewModel: KasirViewModel) {
         fmt
     }
 
+    val business by viewModel.currentBusiness.collectAsState()
+    var showEditShopProfile by remember { mutableStateOf(false) }
+    var showOwnerCodeDialog by remember { mutableStateOf(false) }
     var showLanguagesPicker by remember { mutableStateOf(false) }
+    var activeSettingSubScreen by remember { mutableStateOf<String?>(null) }
+
+    if (showEditShopProfile) {
+        val biz = business
+        var shopName by remember { mutableStateOf(biz?.namaBisnis ?: "") }
+        var shopAddress by remember { mutableStateOf(biz?.alamat ?: "") }
+        var shopPhone by remember { mutableStateOf(biz?.noTelpon ?: "") }
+        var logoImgUri by remember { mutableStateOf<Uri?>(null) }
+        var logoImgBytes by remember { mutableStateOf<ByteArray?>(null) }
+        var isUploadingLogo by remember { mutableStateOf(false) }
+
+        val logoPickerLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.GetContent()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                logoImgUri = uri
+                val compressed = ImageHelper.compressImageUri(context, uri)
+                if (compressed != null) {
+                    logoImgBytes = compressed
+                }
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { if (!isUploadingLogo) showEditShopProfile = false },
+            title = { Text("Edit Profil Toko & Struk", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text("Detail toko di bawah ini akan ditampilkan secara otomatis pada Struk Belanja/Print cetak.", fontSize = 12.sp, color = Color.Gray)
+                    
+                    // Logo Area
+                    Box(
+                        modifier = Modifier
+                            .size(100.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .align(Alignment.CenterHorizontally)
+                            .clickable { logoPickerLauncher.launch("image/*") },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (logoImgUri != null) {
+                            AsyncImage(
+                                model = logoImgUri,
+                                contentDescription = "Logo Preview",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else if (!biz?.logoUrl.isNullOrBlank()) {
+                            ShopLogoImage(
+                                logoUrl = biz?.logoUrl,
+                                contentDescription = biz?.namaBisnis,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(imageVector = Icons.Default.AddPhotoAlternate, contentDescription = null, tint = OrangePrimary)
+                                Text("Upload Logo", fontSize = 10.sp, color = Color.Gray)
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = shopName,
+                        onValueChange = { shopName = it },
+                        label = { Text("Nama Toko") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    OutlinedTextField(
+                        value = shopAddress,
+                        onValueChange = { shopAddress = it },
+                        label = { Text("Alamat Toko") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    OutlinedTextField(
+                        value = shopPhone,
+                        onValueChange = { shopPhone = it },
+                        label = { Text("No Telepon Toko") },
+                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone)
+                    )
+
+                    if (isUploadingLogo) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text("Mengupload logo toko...", fontSize = 11.sp, color = Color.Gray)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (shopName.isBlank()) {
+                            Toast.makeText(context, "Nama toko tidak boleh kosong!", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        isUploadingLogo = true
+                        scope.launch {
+                            val ownerId = user?.uid ?: "owner-main"
+                            var finalLogoUrl = biz?.logoUrl
+                            val bytes = logoImgBytes
+                            if (bytes != null) {
+                                try {
+                                    finalLogoUrl = ImageHelper.uploadShopLogo(context, ownerId, bytes)
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                }
+                            }
+                            viewModel.updateBusinessProfile(shopName, shopAddress.takeIf { it.isNotBlank() }, shopPhone.takeIf { it.isNotBlank() }, finalLogoUrl) {
+                                isUploadingLogo = false
+                                showEditShopProfile = false
+                                Toast.makeText(context, "Profil Toko diperbarui!", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    enabled = !isUploadingLogo,
+                    colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary)
+                ) {
+                    Text("Simpan")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { if (!isUploadingLogo) showEditShopProfile = false }, enabled = !isUploadingLogo) {
+                    Text("Batal")
+                }
+            }
+        )
+    }
+
+    if (showOwnerCodeDialog) {
+        var code by remember { mutableStateOf(viewModel.getOwnerVerificationCode()) }
+        AlertDialog(
+            onDismissRequest = { showOwnerCodeDialog = false },
+            title = { Text("Kode Otoritas Pemilik", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Kode verifikasi ini digunakan untuk menyetujui koreksi / edit transaksi yang dilakukan oleh Staff Kasir.", fontSize = 12.sp, color = Color.Gray)
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { if (it.length <= 8) code = it },
+                        label = { Text("Masukkan Kode Otoritas (Angka/Huruf)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (code.isBlank()) {
+                            Toast.makeText(context, "Kode tidak boleh kosong!", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        viewModel.saveOwnerVerificationCode(code)
+                        showOwnerCodeDialog = false
+                        Toast.makeText(context, "Kode Otoritas disimpan!", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary)
+                ) {
+                    Text("Simpan")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showOwnerCodeDialog = false }) {
+                    Text("Batal")
+                }
+            }
+        )
+    }
 
     if (viewModel.activeScreen.collectAsState().value == "premium_pricing") {
         PremiumPricingView(viewModel)
+    } else if (activeSettingSubScreen != null) {
+        val defaultTitle = when (activeSettingSubScreen) {
+            "PELANGGAN" -> "Loyalty Pelanggan & CRM"
+            "PROMO" -> "Manajemen Promo & Kupon"
+            "CABANG" -> "Outlet Multi-Cabang"
+            "KASIR" -> "Staf & Akun Kasir"
+            else -> "Fitur Premium"
+        }
+        Scaffold(
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            topBar = {
+                TopAppBar(
+                    title = { Text(defaultTitle, fontWeight = FontWeight.Bold) },
+                    navigationIcon = {
+                        IconButton(onClick = { activeSettingSubScreen = null }) {
+                            Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                )
+            }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                if (!isPremium) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = OrangeLight),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(imageVector = Icons.Default.Lock, contentDescription = null, tint = OrangePrimary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Mode Peninjauan (Demo Premium)", fontWeight = FontWeight.Bold, color = OrangeDark, fontSize = 12.sp)
+                                Text("Anda sedang melihat contoh fitur ini. Agar dapat menambah/menyimpan data secara realtime, silakan Upgrade ke Premium Pro.", fontSize = 11.sp, color = OrangeDark)
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = { viewModel.activeScreen.value = "premium_pricing" },
+                                colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text("Upgrade", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                Box(modifier = Modifier.fillMaxSize().weight(1f)) {
+                    when (activeSettingSubScreen) {
+                        "PELANGGAN" -> PremiumPelangganTab(viewModel)
+                        "PROMO" -> PremiumPromoTab(viewModel)
+                        "CABANG" -> PremiumCabangTab(viewModel)
+                        "KASIR" -> PremiumKasirTab(viewModel)
+                    }
+                }
+            }
+        }
     } else {
         Scaffold(
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
             topBar = {
                 val isKasir = user?.role == "kasir"
                 TopAppBar(
@@ -459,11 +718,162 @@ fun BackupSettingsScreen(viewModel: KasirViewModel) {
                     }
                 }
 
+                Text("Fitur Bisnis & Loyalitas (Premium)", fontWeight = FontWeight.Bold, color = OrangePrimary, fontSize = 14.sp)
+
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column {
+                        // Pelanggan Row
+                        Row(
+                            modifier = Modifier
+                                .clickable { activeSettingSubScreen = "PELANGGAN" }
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.People, contentDescription = null, tint = OrangePrimary)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Loyalty Pelanggan & CRM")
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (!isPremium) {
+                                    Icon(imageVector = Icons.Default.Lock, contentDescription = "Locked", tint = Color(0xFFEAB308), modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+                                Icon(imageVector = Icons.Default.ArrowForward, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        HorizontalDivider()
+
+                        // Promo Row
+                        Row(
+                            modifier = Modifier
+                                .clickable { activeSettingSubScreen = "PROMO" }
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.LocalActivity, contentDescription = null, tint = OrangePrimary)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Manajemen Promo & Kupon")
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (!isPremium) {
+                                    Icon(imageVector = Icons.Default.Lock, contentDescription = "Locked", tint = Color(0xFFEAB308), modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+                                Icon(imageVector = Icons.Default.ArrowForward, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        HorizontalDivider()
+
+                        // Cabang Row
+                        Row(
+                            modifier = Modifier
+                                .clickable { activeSettingSubScreen = "CABANG" }
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.AddBusiness, contentDescription = null, tint = OrangePrimary)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Outlet Multi-Cabang")
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (!isPremium) {
+                                    Icon(imageVector = Icons.Default.Lock, contentDescription = "Locked", tint = Color(0xFFEAB308), modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+                                Icon(imageVector = Icons.Default.ArrowForward, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        HorizontalDivider()
+
+                        // Kasir Row
+                        Row(
+                            modifier = Modifier
+                                .clickable { activeSettingSubScreen = "KASIR" }
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.Badge, contentDescription = null, tint = OrangePrimary)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Staf & Akun Kasir")
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (!isPremium) {
+                                    Icon(imageVector = Icons.Default.Lock, contentDescription = "Locked", tint = Color(0xFFEAB308), modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+                                Icon(imageVector = Icons.Default.ArrowForward, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
                 Text("Pengaturan Aplikasi", fontWeight = FontWeight.Bold, color = OrangePrimary, fontSize = 14.sp)
 
                 // Layout settings preferences
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column {
+                        // Edit Profil Toko & Struk
+                        Row(
+                            modifier = Modifier
+                                .clickable { showEditShopProfile = true }
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.Storefront, contentDescription = null, tint = OrangePrimary)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Edit Profil Toko & Struk")
+                            }
+                            Icon(imageVector = Icons.Default.ArrowForward, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(16.dp))
+                        }
+                        HorizontalDivider()
+
+                        // Generate Kode Unik Pemilik (Premium Only)
+                        Row(
+                            modifier = Modifier
+                                .clickable { 
+                                    if (isPremium) {
+                                        showOwnerCodeDialog = true
+                                    } else {
+                                        viewModel.showLimitPopup.value = "Fitur Kode Unik Otoritas Koreksi hanya untuk pengguna Premium. Upgrade sekarang!"
+                                    }
+                                }
+                                .padding(16.dp)
+                                .fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.VpnKey, contentDescription = null, tint = OrangePrimary)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Kode Otoritas Koreksi")
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (!isPremium) {
+                                    Icon(imageVector = Icons.Default.Lock, contentDescription = "Locked", tint = Color(0xFFEAB308), modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                }
+                                Icon(imageVector = Icons.Default.ArrowForward, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                        HorizontalDivider()
+
                         // Dark Mode Toggle Switch
                         Row(
                             modifier = Modifier
@@ -665,32 +1075,40 @@ fun PremiumPricingView(viewModel: KasirViewModel) {
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        Spacer(modifier = Modifier.height(24.dp))
+
+        var selectedIsYearly by remember { mutableStateOf(false) }
+
         // Card Subscription pricing packs
         Card(
+            onClick = { selectedIsYearly = false },
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(containerColor = Slate700)
+            border = if (!selectedIsYearly) androidx.compose.foundation.BorderStroke(2.dp, OrangePrimary) else null,
+            colors = CardDefaults.cardColors(containerColor = if (!selectedIsYearly) Slate700 else Slate800)
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("PAKET PRO INDONESIA", fontWeight = FontWeight.Bold, color = Color.White)
-                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color.LightGray)
-                
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text("PRO BULANAN", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 16.sp)
-                        Text("Hemat waktu operasional kencang", fontSize = 11.sp, color = Color.LightGray)
-                    }
-                    Text("Rp 29.000 / bln", fontWeight = FontWeight.ExtraBold, color = OrangePrimary, fontSize = 18.sp)
+            Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("PRO BULANAN", fontWeight = FontWeight.Bold, color = Color.White, fontSize = 16.sp)
+                    Text("Hemat waktu operasional kencang", fontSize = 11.sp, color = Color.LightGray)
                 }
+                Text("Rp 29.000 / bln", fontWeight = FontWeight.ExtraBold, color = OrangePrimary, fontSize = 18.sp)
+            }
+        }
 
-                Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text("PRO TAHUNAN", fontWeight = FontWeight.Bold, color = Color.Green, fontSize = 16.sp)
-                        Text("Hemat 42% paket langganan tahunan!", fontSize = 11.sp, color = Color.LightGray)
-                    }
-                    Text("Rp 199.000 / thn", fontWeight = FontWeight.ExtraBold, color = Color.Green, fontSize = 18.sp)
+        Card(
+            onClick = { selectedIsYearly = true },
+            modifier = Modifier.fillMaxWidth(),
+            border = if (selectedIsYearly) androidx.compose.foundation.BorderStroke(2.dp, Color.Green) else null,
+            colors = CardDefaults.cardColors(containerColor = if (selectedIsYearly) Slate700 else Slate800)
+        ) {
+            Row(modifier = Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("PRO TAHUNAN", fontWeight = FontWeight.Bold, color = Color.Green, fontSize = 16.sp)
+                    Text("Hemat 42% paket langganan tahunan!", fontSize = 11.sp, color = Color.LightGray)
                 }
+                Text("Rp 199.000 / thn", fontWeight = FontWeight.ExtraBold, color = Color.Green, fontSize = 18.sp)
             }
         }
 
@@ -703,8 +1121,9 @@ fun PremiumPricingView(viewModel: KasirViewModel) {
                 scope.launch {
                     kotlinx.coroutines.delay(2000) // simulated network delay
                     isVerifyingPayment = false
-                    viewModel.upgradeToPremium()
-                    Toast.makeText(context, "SINKRONISASI MIDTRANS: Transaksi Sukses! Akun Anda aktif sebagai Premium Pro.", Toast.LENGTH_LONG).show()
+                    viewModel.upgradeToPremium(selectedIsYearly)
+                    val label = if (selectedIsYearly) "Tahunan" else "Bulanan"
+                    Toast.makeText(context, "SINKRONISASI MIDTRANS: Transaksi Sukses! Akun Anda aktif sebagai Premium Pro ($label).", Toast.LENGTH_LONG).show()
                 }
             },
             colors = ButtonDefaults.buttonColors(containerColor = OrangePrimary),
