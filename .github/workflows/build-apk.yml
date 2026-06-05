@@ -1,4 +1,3 @@
-
 name: Build APK
 
 on:
@@ -26,9 +25,6 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Copy Keystore to App Folder
-        run: mkdir -p app && cp debug.keystore app/debug.keystore || true
-
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
@@ -37,4 +33,3 @@ jobs:
         with:
           name: kasir-pro-debug
           path: app/build/outputs/apk/debug/app-debug.apk
-
